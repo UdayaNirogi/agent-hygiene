@@ -6,11 +6,15 @@ A small local CLI for macOS and Linux that shows what coding-agent CLIs (Codex, 
 Cursor Agent, Gemini CLI, Copilot CLI, OpenCode, Devin, Aider) leave behind on your machine,
 and cleans it up safely.
 
-Agent CLIs can leave auto-starting background processes, self-updaters, and gigabytes of old
-version folders, and some keep running after you quit. `agent-hygiene` is **read-only by
-default**, and **every change it makes is reversible**.
+Agent CLIs can leave auto-starting background processes, self-updaters, and old version
+folders that pile up, and some keep running after you quit. `agent-hygiene` is **read-only
+by default**, and **every change it makes is reversible**.
 
 Think of it as Task Manager + the Startup tab + "Programs and Features", scoped to agents.
+
+Example output from one machine. The disk sizes were measured on that machine; they are
+not a typical total, and yours will differ a lot depending on which agents you use and how
+often they update. The process row shows how a leftover Codex updater is reported.
 
 ```
 $ agent-hygiene scan
@@ -19,18 +23,18 @@ Agents
 ======
 agent   present  disk    versions  stale  self-update  auto-start  install
 ------  -------  ------  --------  -----  -----------  ----------  -------
-claude  yes      221 MB  1         0      on           n/a         ~/.local/bin/claude
-codex   yes      410 MB  3         1      on           on          ~/.local/bin/codex
-cursor  yes      6.8 GB  16        15     n/a          n/a         -
-gemini  yes      18 MB   0         0      on           n/a         -
+claude  yes      246 MB  1         0      on           n/a         ~/.local/bin/claude
+codex   yes      595 MB  2         0      on           on          ~/.local/bin/codex
+cursor  yes      561 MB  2         0      n/a          n/a         -
+gemini  yes      121 MB  0         0      on           n/a         -
 
 Processes
 =========
-agent   pid    ppid  tty  uptime  rss             command                                   parent
-------  -----  ----  ---  ------  -----  --------  ----------------------------------------  -------------
-cursor  34836  1     ??   1h24m   30 MB  LEFTOVER  …/cursor-agent --api-key ***              /sbin/launchd
+agent   pid    ppid  tty  uptime  rss                    command                                          parent
+------  -----  ----  ---  ------  -----  ----------------  -----------------------------------------------  -------------
+codex   51234  1     ??   3h10m   21 MB  LEFTOVER updater  …/codex app-server daemon pid-update-loop        /sbin/launchd
 
-total agent disk use: 6.8 GB   stale versions: 6.0 GB   auto-start entries: 0   leftover processes: 1
+total agent disk use: 1.5 GB   stale versions: 0 B   auto-start entries: 0   leftover processes: 1
 ```
 
 ## Install
@@ -221,4 +225,5 @@ spawn real background processes to prove that nothing survives the wrapper.
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Releases 0.1.0 to 0.1.2 were published under GPL-3.0-or-later
+and stay under that license; 0.2.0 and later are MIT.
