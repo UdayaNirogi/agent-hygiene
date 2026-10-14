@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit and end-to-end tests
+        run: python -m unittest discover -s tests -t . -v
+      - name: Scan the runner (read-only smoke test)
+        run: |
+          python -m agent_hygiene scan
+          python -m agent_hygiene scan --json > /dev/null
+          python -m agent_hygiene clean --dry-run
+      - name: Policy template round-trip
+        run: |
+          python -m agent_hygiene policy init --file /tmp/policy.json
+          python -m agent_hygiene policy check --file /tmp/policy.json
