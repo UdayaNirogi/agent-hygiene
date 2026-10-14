@@ -142,6 +142,31 @@ agent-hygiene clean --policy team.json  # prune with the policy's keep_versions
 }
 ```
 
+## Privacy and security
+
+- **Nothing leaves your machine.** No network calls, telemetry, analytics or update checks;
+  a test fails the build if a networking module is ever imported.
+- **Only your own processes.** `scan` reads processes owned by the current user, never other
+  accounts on the machine.
+- **Secrets are redacted** from every command line it prints or logs: API-key and token flags,
+  `*_KEY=`/`*_TOKEN=` variables, `Bearer` headers, `user:password@` URLs, and known key formats
+  (OpenAI, Anthropic, Cursor, GitHub, GitLab, Slack, Google, AWS, npm, PyPI, JWTs).
+- **Private state.** `~/.agent-hygiene` (backups and run logs) is created owner-only (`0700`),
+  because a settings backup can contain the same API keys as the original file.
+- **Tamper-resistant undo.** `restore` only moves files that live inside the backup folder,
+  `purge` refuses a trash folder that has been replaced by a symlink, and files are written
+  through fresh temp files rather than predictable names.
+- **Careful with processes.** `--kill` re-checks that a pid still runs the same command before
+  signalling it, and `run` matches tracked children by pid *and* command, so a reused pid is
+  never killed.
+- **No surprises from cloned repos.** `clean` ignores policy files in the current directory;
+  pass `--policy FILE` or use `~/.config/agent-hygiene/policy.json`.
+- **Not as root.** `clean`, `restore`, `purge` and `run` refuse to run under `sudo`.
+- Zero third-party dependencies, and no `shell=True` anywhere.
+
+Report a vulnerability privately through GitHub's "Report a vulnerability" button on the
+repository's Security tab.
+
 ## What it will not do
 
 - No hosted sandbox; `run` is a local process supervisor, not an isolation boundary.

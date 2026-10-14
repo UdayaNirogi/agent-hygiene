@@ -9,21 +9,28 @@ from .. import agents
 from ..model import PortInfo, ProcessInfo
 from ..platform import have, run
 
-PS_ARGS = ["ps", "-eo", "pid=,ppid=,pgid=,tty=,etime=,rss=,args="]
+PS_ARGS = ["ps", "-eo", "pid=,ppid=,pgid=,uid=,tty=,etime=,rss=,args="]
 
 # Command lines can carry credentials (e.g. `--api-key crsr_...`). Never print or log them.
 _SECRET_FLAG = re.compile(
-    r"(?i)(--?(?:api[-_]?key|token|access[-_]?token|secret|password|passwd|auth(?:orization)?)(?:[=\s]+))(\S+)")
-_SECRET_ENV = re.compile(r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*=)(\S+)")
+    r"(?i)(--?(?:[a-z0-9]+[-_])*(?:api[-_]?key|key|token|secret|password|passwd|pass|pwd|auth(?:orization)?"
+    r"|credentials?|cookie)(?:[=\s]+))(\S+)")
+_SECRET_ENV = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|COOKIE|AUTH)[A-Z0-9_]*=)(\S+)")
+_SECRET_BEARER = re.compile(r"(?i)\b((?:bearer|basic|token)\s+)([A-Za-z0-9._~+/=-]{8,})")
+_SECRET_URL = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^/\s@]+)@")
 _SECRET_TOKEN = re.compile(
-    r"\b(sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|crsr_[A-Za-z0-9]{8,}|gh[pousr]_[A-Za-z0-9]{8,}"
-    r"|xox[abprs]-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{12,})\b")
+    r"\b(sk-[A-Za-z0-9_-]{8,}|crsr_[A-Za-z0-9]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}"
+    r"|glpat-[A-Za-z0-9_-]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{12,}"
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,})")
 
 
-def redact(command: str) -> str:
-    command = _SECRET_FLAG.sub(lambda m: m.group(1) + "***", command)
-    command = _SECRET_ENV.sub(lambda m: m.group(1) + "***", command)
-    return _SECRET_TOKEN.sub("***", command)
+def redact(text: str) -> str:
+    text = _SECRET_URL.sub(lambda m: m.group(1) + "***:***@", text)
+    text = _SECRET_BEARER.sub(lambda m: m.group(1) + "***", text)
+    text = _SECRET_FLAG.sub(lambda m: m.group(1) + "***", text)
+    text = _SECRET_ENV.sub(lambda m: m.group(1) + "***", text)
+    return _SECRET_TOKEN.sub("***", text)
 
 
 def parse_etime(text: str) -> int:
@@ -42,13 +49,13 @@ def parse_etime(text: str) -> int:
 def parse_ps(output: str) -> List[ProcessInfo]:
     procs: List[ProcessInfo] = []
     for line in output.splitlines():
-        parts = line.split(None, 6)
-        if len(parts) < 7:
+        parts = line.split(None, 7)
+        if len(parts) < 8:
             continue
         try:
             procs.append(ProcessInfo(
-                pid=int(parts[0]), ppid=int(parts[1]), pgid=int(parts[2]), tty=parts[3],
-                etime_s=parse_etime(parts[4]), rss_kb=int(parts[5]), command=redact(parts[6].strip()),
+                pid=int(parts[0]), ppid=int(parts[1]), pgid=int(parts[2]), uid=int(parts[3]), tty=parts[4],
+                etime_s=parse_etime(parts[5]), rss_kb=int(parts[6]), command=redact(parts[7].strip()),
             ))
         except ValueError:
             continue
@@ -56,12 +63,14 @@ def parse_ps(output: str) -> List[ProcessInfo]:
 
 
 def list_processes(warnings: Optional[List[str]] = None) -> List[ProcessInfo]:
+    """The current user's processes only; other accounts' processes are never read or reported."""
     res = run(PS_ARGS, timeout=15)
     if res.returncode != 0:
         if warnings is not None:
             warnings.append(f"ps failed: {res.stderr.strip() or res.returncode}")
         return []
-    return parse_ps(res.stdout)
+    me = os.getuid()
+    return [p for p in parse_ps(res.stdout) if p.uid == me]
 
 
 def _no_tty(tty: str) -> bool:

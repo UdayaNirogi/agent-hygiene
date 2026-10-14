@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -34,12 +35,45 @@ def state_dir() -> Path:
     return Path(override) if override else home() / ".agent-hygiene"
 
 
+def private_state_dir() -> Path:
+    """The state dir, created owner-only (0700): backups can hold copies of settings files
+    with API keys, and run logs list file names."""
+    d = state_dir()
+    if d.is_symlink():
+        raise RuntimeError(f"{d} is a symlink; refusing to use it as the agent-hygiene state dir")
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    return d
+
+
 def backups_dir() -> Path:
     return state_dir() / "backups"
 
 
 def runs_dir() -> Path:
     return state_dir() / "runs"
+
+
+def atomic_write(path: Path, text: str, mode: Optional[int] = None) -> None:
+    """Write via a fresh O_EXCL temp file in the same dir, then rename over `path`."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def is_within(child: str, parent: Path) -> bool:
+    """True if `child` lies inside `parent`, judged without following a final symlink."""
+    c = os.path.join(os.path.realpath(os.path.dirname(child)), os.path.basename(child))
+    p = os.path.realpath(parent)
+    return c.startswith(p + os.sep)
 
 
 def uid() -> int:

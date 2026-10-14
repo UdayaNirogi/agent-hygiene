@@ -1,5 +1,6 @@
 import os
 import plistlib
+import subprocess
 import unittest
 from unittest import mock
 
@@ -40,21 +41,68 @@ class TestProcesses(unittest.TestCase):
 
     def test_parse_ps_and_redact(self):
         out = (
-            "  100     1   100 ??       01:00  3000 /x/.local/bin/claude --api-key sk-abcdefghijklmnop serve\n"
-            "  101   100   100 ??       00:30  1000 node child.js TOKEN=verysecretvalue\n"
-            "  200   999   200 ttys001  00:10   500 /bin/zsh\n"
+            "  100     1   100   501 ??       01:00  3000 /x/.local/bin/claude --api-key sk-abcdefghijklmnop serve\n"
+            "  101   100   100   501 ??       00:30  1000 node child.js TOKEN=verysecretvalue\n"
+            "  200   999   200     0 ttys001  00:10   500 /bin/zsh\n"
         )
         procs = processes.parse_ps(out)
         self.assertEqual([p.pid for p in procs], [100, 101, 200])
+        self.assertEqual([p.uid for p in procs], [501, 501, 0])
         self.assertIn("--api-key ***", procs[0].command)
         self.assertNotIn("sk-abcdefghijklmnop", procs[0].command)
         self.assertIn("TOKEN=***", procs[1].command)
         self.assertEqual(procs[0].etime_s, 60)
 
+    def test_list_processes_only_returns_current_user(self):
+        me = os.getuid()
+        out = (f"  10  1 10 {me} ?? 00:01 1 /x/claude\n"
+               f"  11  1 11 {me + 1} ?? 00:01 1 /x/claude --other-user\n")
+        fake = subprocess.CompletedProcess([], 0, out, "")
+        with mock.patch.object(processes, "run", return_value=fake):
+            self.assertEqual([p.pid for p in processes.list_processes()], [10])
+
     def test_redact_known_token_shapes(self):
-        self.assertEqual(processes.redact("x crsr_dd27c3554921041e818582fb y"), "x *** y")
-        self.assertEqual(processes.redact("x ghp_abcdefghijklmnop y"), "x *** y")
-        self.assertEqual(processes.redact("plain command --flag value"), "plain command --flag value")
+        fake = {
+            "cursor": "crsr_" + "0" * 40,
+            "openai": "sk-proj-" + "A" * 30,
+            "anthropic": "sk-ant-api03-" + "B" * 30,
+            "github": "ghp_" + "C" * 36,
+            "github_pat": "github_pat_" + "D" * 40,
+            "slack": "xoxb-" + "1" * 20,
+            "google": "AIza" + "E" * 35,
+            "aws": "AKIA" + "F" * 16,
+            "jwt": "eyJ" + "a" * 20 + "." + "b" * 20 + "." + "c" * 20,
+            "pypi": "pypi-" + "G" * 40,
+            "npm": "npm_" + "H" * 36,
+        }
+        for name, secret in fake.items():
+            with self.subTest(name):
+                self.assertEqual(processes.redact(f"x {secret} y"), "x *** y")
+
+    def test_redact_flags_headers_urls(self):
+        cases = {
+            "tool --api-key=abc123 run": "tool --api-key=*** run",
+            "tool --openai-api-key abc123": "tool --openai-api-key ***",
+            "tool --password hunter2": "tool --password ***",
+            "curl -H Authorization: Bearer abcdefghijkl": "curl -H Authorization: Bearer ***",
+            "git clone https://user:s3cret@example.com/repo": "git clone https://***:***@example.com/repo",
+            "env ANTHROPIC_API_KEY=abc OTHER=1 claude": "env ANTHROPIC_API_KEY=*** OTHER=1 claude",
+        }
+        for raw, want in cases.items():
+            with self.subTest(raw):
+                self.assertEqual(processes.redact(raw), want)
+
+    def test_redact_leaves_ordinary_commands_alone(self):
+        for cmd in ("plain command --flag value", "agent-hygiene clean --keep 2",
+                    "/x/.local/share/claude/versions/2.1.201", "node index.js --use-system-ca"):
+            with self.subTest(cmd):
+                self.assertEqual(processes.redact(cmd), cmd)
+
+    def test_autostart_program_is_redacted(self):
+        crontab = "0 * * * * /usr/local/bin/codex --api-key sk-abcdefghijklmnop update\n"
+        with mock.patch.object(autostart, "read_crontab", return_value=crontab):
+            entries = autostart.scan_cron([])
+        self.assertNotIn("sk-abcdefghijklmnop", entries[0].program)
 
     def test_annotate_orphans_and_children(self):
         procs = [

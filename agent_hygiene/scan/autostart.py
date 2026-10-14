@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Set
 
 from .. import agents
 from ..model import AutostartEntry
+from .processes import redact
 from ..platform import IS_LINUX, IS_MACOS, have, launch_agents_dirs, run, systemd_user_dirs, uid
 
 
@@ -89,7 +90,7 @@ def scan_launch_agents(warnings: List[str]) -> List[AutostartEntry]:
             is_disabled = bool(data.get("Disabled")) or label in disabled
             entries.append(AutostartEntry(
                 kind="launchagent", id=label, path=str(plist), agent=agent,
-                enabled=not is_disabled, program=program,
+                enabled=not is_disabled, program=redact(program),
                 detail=", ".join(flags) + (" (loaded)" if label in loaded else ""),
                 user_writable=os.access(plist.parent, os.W_OK),
             ))
@@ -152,7 +153,7 @@ def scan_systemd_user(warnings: List[str]) -> List[AutostartEntry]:
             entries.append(AutostartEntry(
                 kind="systemd-user", id=unit.name, path=str(unit), agent=agent,
                 enabled=state in ("enabled", "enabled-runtime", "static", "linked", "alias"),
-                program=program, detail=f"{state}; {desc}".strip("; "),
+                program=redact(program), detail=redact(f"{state}; {desc}".strip("; ")),
                 user_writable=os.access(unit.parent, os.W_OK),
             ))
     return entries
@@ -170,7 +171,7 @@ def read_crontab() -> Optional[str]:
 
 
 def cron_line_id(line: str) -> str:
-    return hashlib.sha1(line.strip().encode()).hexdigest()[:10]
+    return hashlib.sha256(line.strip().encode()).hexdigest()[:10]
 
 
 def scan_cron(warnings: List[str]) -> List[AutostartEntry]:
@@ -190,6 +191,6 @@ def scan_cron(warnings: List[str]) -> List[AutostartEntry]:
         program = parts[5] if len(parts) >= 6 else stripped
         entries.append(AutostartEntry(
             kind="cron", id=cron_line_id(stripped), path="crontab", agent=agent,
-            enabled=True, program=program, detail=schedule,
+            enabled=True, program=redact(program), detail=schedule,
         ))
     return entries

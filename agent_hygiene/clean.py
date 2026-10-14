@@ -18,9 +18,10 @@ from . import agents
 from .journal import Journal
 from .model import AutostartEntry, Inventory
 from .output import human_bytes, shorten_home, table
-from .platform import have, run, uid
+from .platform import atomic_write, have, run, uid
 from .scan.autostart import read_crontab
 from .scan.footprint import select_prunable
+from .scan.processes import list_processes
 
 DEFAULT_KEEP = 2
 
@@ -168,9 +169,9 @@ def _apply_launchagent(action: Action, journal: Journal) -> Dict[str, Any]:
 
 def _apply_systemd(action: Action, journal: Journal) -> Dict[str, Any]:
     unit = action.data["unit"]
-    was_enabled = run(["systemctl", "--user", "is-enabled", unit], timeout=10).stdout.strip()
-    was_active = run(["systemctl", "--user", "is-active", unit], timeout=10).stdout.strip()
-    res = run(["systemctl", "--user", "disable", "--now", unit], timeout=20)
+    was_enabled = run(["systemctl", "--user", "is-enabled", "--", unit], timeout=10).stdout.strip()
+    was_active = run(["systemctl", "--user", "is-active", "--", unit], timeout=10).stdout.strip()
+    res = run(["systemctl", "--user", "disable", "--now", "--", unit], timeout=20)
     if res.returncode != 0:
         raise RuntimeError(res.stderr.strip() or f"systemctl exited {res.returncode}")
     return {"unit": unit, "was_enabled": was_enabled, "was_active": was_active}
@@ -201,10 +202,13 @@ def _apply_cron(action: Action, journal: Journal) -> Dict[str, Any]:
 
 def _apply_self_update(action: Action, journal: Journal) -> Dict[str, Any]:
     spec = agents.by_name(action.agent)
-    assert spec is not None and spec.self_update is not None
-    path = Path(action.data["path"])
+    if spec is None or spec.self_update is None:
+        raise RuntimeError(f"{action.agent} has no self-update setting")
+    # Edit the real file behind a symlinked settings file (dotfile repos), keeping the link.
+    path = Path(os.path.realpath(action.data["path"]))
     existed = path.is_file()
     backup = None
+    created_dirs: List[str] = []
     if existed:
         backup = journal.unique_file("settings", f"{action.agent}-{path.name}")
         shutil.copy2(str(path), str(backup))
@@ -212,21 +216,23 @@ def _apply_self_update(action: Action, journal: Journal) -> Dict[str, Any]:
             data = json.loads(path.read_text() or "{}")
         except ValueError as exc:
             raise RuntimeError(f"{path} is not valid JSON: {exc}")
+        if not isinstance(data, dict):
+            raise RuntimeError(f"{path} does not contain a JSON object")
     else:
         data = {}
+        missing = [p for p in [path.parent, *path.parent.parents] if not p.exists()]
         path.parent.mkdir(parents=True, exist_ok=True)
+        created_dirs = [str(p) for p in missing]
     cur = data
     for k in spec.self_update.key[:-1]:
         if not isinstance(cur.get(k), dict):
             cur[k] = {}
         cur = cur[k]
     cur[spec.self_update.key[-1]] = spec.self_update.disabled_value
-    tmp = path.with_suffix(path.suffix + ".agent-hygiene.tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    if existed:
-        shutil.copymode(str(path), str(tmp))
-    os.replace(tmp, path)
-    return {"path": str(path), "existed": existed, "backup": str(backup) if backup else None}
+    mode = path.stat().st_mode & 0o7777 if existed else 0o600
+    atomic_write(path, json.dumps(data, indent=2) + "\n", mode=mode)
+    return {"path": str(path), "existed": existed, "backup": str(backup) if backup else None,
+            "created_dirs": created_dirs}
 
 
 def _apply_prune(action: Action, journal: Journal) -> Dict[str, Any]:
@@ -239,6 +245,12 @@ def _apply_prune(action: Action, journal: Journal) -> Dict[str, Any]:
 
 def _apply_kill(action: Action, journal: Journal) -> Dict[str, Any]:
     pid = int(action.data["pid"])
+    # The pid may have exited and been reused since the scan; only signal the same process.
+    current = next((p for p in list_processes() if p.pid == pid), None)
+    if current is None:
+        raise RuntimeError("process already exited")
+    if current.command != action.data["command"]:
+        raise RuntimeError("pid now belongs to a different process; not touching it")
     os.kill(pid, signal.SIGTERM)
     deadline = time.time() + 5
     while time.time() < deadline:

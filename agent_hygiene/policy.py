@@ -50,20 +50,67 @@ class Violation:
     fix: str
 
 
+_INT_KEYS = ("keep_versions",)
+_SIZE_KEYS = ("max_disk_per_agent", "max_disk_total", "max_disk")
+_BOOL_KEYS = ("allow_self_update", "allow_leftover_processes")
+
+
+def _validate_block(block: Dict[str, Any], where: str) -> None:
+    for k in _INT_KEYS:
+        if k in block and (not isinstance(block[k], int) or isinstance(block[k], bool) or not 1 <= block[k] <= 1000):
+            raise ValueError(f"{where}{k} must be an integer between 1 and 1000")
+    for k in _SIZE_KEYS:
+        if k in block and block[k] not in (None, ""):
+            try:
+                parse_bytes(block[k])
+            except (TypeError, ValueError):
+                raise ValueError(f"{where}{k} must be a size like \"5GB\"")
+    for k in _BOOL_KEYS:
+        if k in block and not isinstance(block[k], bool):
+            raise ValueError(f"{where}{k} must be true or false")
+
+
+def validate(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError("policy must be a JSON object")
+    _validate_block(data, "")
+    allowed = data.get("allowed_autostarts", [])
+    if not isinstance(allowed, list) or not all(isinstance(x, str) for x in allowed):
+        raise ValueError("allowed_autostarts must be a list of strings")
+    per_agent = data.get("agents", {}) or {}
+    if not isinstance(per_agent, dict):
+        raise ValueError("agents must be an object")
+    for name, cfg in per_agent.items():
+        if not isinstance(cfg, dict):
+            raise ValueError(f"agents.{name} must be an object")
+        _validate_block(cfg, f"agents.{name}.")
+    return data
+
+
 class Policy:
     def __init__(self, data: Dict[str, Any], source: str = "<inline>"):
-        self.data = data
+        self.data = validate(data)
         self.source = source
 
     @classmethod
-    def load(cls, path: Optional[str]) -> Optional["Policy"]:
-        candidates = [path] if path else ([os.environ.get("AGENT_HYGIENE_POLICY")] + DEFAULT_LOCATIONS)
+    def load(cls, path: Optional[str], include_cwd: bool = True) -> Optional["Policy"]:
+        """`include_cwd=False` ignores policy files in the current directory, so a cloned
+        repository cannot change what `clean` does just by shipping a policy file."""
+        defaults = [loc for loc in DEFAULT_LOCATIONS if include_cwd or not loc.startswith("./")]
+        candidates = [path] if path else ([os.environ.get("AGENT_HYGIENE_POLICY")] + defaults)
         for cand in candidates:
             if not cand:
                 continue
             p = Path(os.path.expanduser(cand))
             if p.is_file():
-                return cls(json.loads(p.read_text()), str(p))
+                try:
+                    data = json.loads(p.read_text())
+                except ValueError as exc:
+                    raise ValueError(f"{p}: invalid JSON: {exc}")
+                try:
+                    return cls(data, str(p))
+                except ValueError as exc:
+                    raise ValueError(f"{p}: {exc}")
             if path:
                 raise FileNotFoundError(f"policy file not found: {p}")
         return None

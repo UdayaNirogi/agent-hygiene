@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .platform import backups_dir
+from .platform import atomic_write, backups_dir, is_within, private_state_dir
 
 
 class Journal:
@@ -32,6 +32,7 @@ class Journal:
 
     @classmethod
     def create(cls) -> "Journal":
+        private_state_dir()
         base = backups_dir()
         base.mkdir(parents=True, exist_ok=True)
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -106,9 +107,11 @@ class Journal:
         self.save()
 
     def save(self) -> None:
-        tmp = self.manifest_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=2, default=str))
-        os.replace(tmp, self.manifest_path)
+        atomic_write(self.manifest_path, json.dumps(self.data, indent=2, default=str), mode=0o600)
+
+    def owns(self, path: str) -> bool:
+        """Backup and trash paths in a manifest must point inside this journal."""
+        return is_within(path, self.root)
 
     def unique_file(self, sub: str, name: str) -> Path:
         d = self.files / sub

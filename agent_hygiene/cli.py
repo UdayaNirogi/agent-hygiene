@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import List, Optional
 
@@ -82,6 +83,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("agent-hygiene supports macOS and Linux only.", file=sys.stderr)
         return 2
     args = build_parser().parse_args(argv)
+    if os.geteuid() == 0 and args.cmd in ("clean", "restore", "purge", "run"):
+        # As root, "user-writable" covers system LaunchAgents and other users' processes,
+        # and backups would land root-owned in the wrong home. Run as the agent's user.
+        print("agent-hygiene: refusing to run this command as root; run it as your normal user.",
+              file=sys.stderr)
+        return 2
     return {
         "scan": cmd_scan, "clean": cmd_clean, "restore": cmd_restore,
         "purge": cmd_purge, "run": cmd_run, "policy": cmd_policy,
@@ -101,9 +108,12 @@ def cmd_clean(args) -> int:
     all_default = not (args.autostart or args.self_update or args.prune or args.kill)
     keep = args.keep if args.keep is not None else DEFAULT_KEEP
     keep_per_agent = None
+    if keep < 1:
+        print("error: --keep must be at least 1", file=sys.stderr)
+        return 2
     if args.policy or args.keep is None:
         try:
-            pol = Policy.load(args.policy)
+            pol = Policy.load(args.policy, include_cwd=False)
         except (FileNotFoundError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

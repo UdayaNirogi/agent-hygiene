@@ -7,6 +7,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from . import agents
 from .model import ProcessInfo
 from .output import shorten_home
-from .platform import IS_LINUX, expand, have, home, run, runs_dir, state_dir
+from .platform import IS_LINUX, atomic_write, expand, have, home, private_state_dir, run, runs_dir, state_dir
 from .scan.processes import descendants, list_processes, redact
 
 SKIP_DIR_NAMES = {
@@ -28,6 +29,8 @@ SKIP_DIR_NAMES = {
     "Music", "Pictures", "Photos Library.photoslibrary",
 }
 MAX_SNAPSHOT_ENTRIES = 400_000
+# orphans are re-parented to pid 1, or to a per-user subreaper on systemd/launchd systems
+_SUBREAPER = re.compile(r"(^|/)(systemd --user|launchd)(\s|$)")
 
 
 @dataclass
@@ -147,7 +150,7 @@ class Supervisor:
         self.tty_fd: Optional[int] = None
         self.proc: Optional[subprocess.Popen] = None
         self.unit: Optional[str] = None
-        self.tracked: Set[int] = set()
+        self.tracked: Dict[int, str] = {}
         self.initial_pids: Set[int] = set()
         self.report = RunReport(agent=agent, command=redact(" ".join(argv)),
                                 started_at=dt.datetime.now().isoformat(timespec="seconds"))
@@ -267,13 +270,11 @@ class Supervisor:
         if self.proc is None:
             return
         procs = list_processes()
-        for p in descendants(procs, self.proc.pid):
-            self.tracked.add(p.pid)
+        cg = _cgroup_pids(f"{self.unit}.scope") if self.unit else set()
+        desc = {p.pid for p in descendants(procs, self.proc.pid)}
         for p in procs:
-            if p.pgid == self.proc.pid:
-                self.tracked.add(p.pid)
-        if self.unit:
-            self.tracked |= _cgroup_pids(f"{self.unit}.scope")
+            if p.pid in desc or p.pgid == self.proc.pid or p.pid in cg:
+                self.tracked[p.pid] = p.command
 
     # -- teardown ----------------------------------------------------------------------
 
@@ -282,18 +283,22 @@ class Supervisor:
         me = os.getpid()
         root = self.proc.pid if self.proc else -1
         cg = _cgroup_pids(f"{self.unit}.scope") if self.unit else set()
+        by_pid = {p.pid: p for p in procs}
         out: List[ProcessInfo] = []
         for p in procs:
             if p.pid == me or p.pid == root:
                 continue
             in_group = p.pgid == root
-            tracked = p.pid in self.tracked
+            # same pid *and* same command line, so a reused pid is never mistaken for ours
+            tracked = self.tracked.get(p.pid) == p.command
             in_cgroup = p.pid in cg
+            parent = by_pid.get(p.ppid)
+            reparented = p.ppid <= 1 or (parent is not None and _SUBREAPER.search(parent.command) is not None)
             escaped = (
                 p.pid not in self.initial_pids
+                and reparented
                 and agents.match_process(p.command) is not None
                 and (self.agent is None or agents.match_process(p.command) == self.agent)
-                and (p.ppid <= 1 or p.tty in ("?", "??", "-"))
             )
             if in_group or tracked or in_cgroup or escaped:
                 out.append(p)
@@ -346,11 +351,12 @@ class Supervisor:
 
     def _finish(self) -> None:
         self.report.ended_at = dt.datetime.now().isoformat(timespec="seconds")
+        private_state_dir()
         runs_dir().mkdir(parents=True, exist_ok=True)
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         path = runs_dir() / f"{stamp}-{self.agent or Path(self.argv[0]).name}.json"
         self.report.log_path = str(path)
-        path.write_text(json.dumps(asdict(self.report), indent=2))
+        atomic_write(path, json.dumps(asdict(self.report), indent=2), mode=0o600)
         self._print_summary()
 
     def _print_summary(self) -> None:

@@ -92,6 +92,7 @@ class ProcessInfo:
     agent: Optional[str] = None
     orphaned: bool = False
     parent_command: str = ""
+    uid: int = -1
 
 
 @dataclass
