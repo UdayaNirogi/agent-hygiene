@@ -1,5 +1,7 @@
 # agent-hygiene
 
+![agent-hygiene: scan and clean what coding agents leave behind, with every change reversible](https://raw.githubusercontent.com/UdayaNirogi/agent-hygiene/main/images/banner.png)
+
 A small local CLI for macOS and Linux that shows what coding-agent CLIs (Codex, Claude Code,
 Cursor Agent, Gemini CLI, Copilot CLI, OpenCode, Devin, Aider) leave behind on your machine,
 and cleans it up safely.

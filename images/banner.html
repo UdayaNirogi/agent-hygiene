@@ -1,0 +1,97 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>agent-hygiene banner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800&family=JetBrains+Mono:wght@500;600&display=block" rel="stylesheet">
+<style>
+  :root {
+    --blue: #0C4EA2;
+    --blue-dark: #0A3F86;
+    --yellow: #FFD43A;
+    --box: #F3F6FD;
+    --ink: #182538;
+    --gray: #4A5568;
+    --green: #2E9E4F;
+    --term: #11192E;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1024px; height: 576px; background: #fff; overflow: hidden; }
+  body { position: relative; font-family: Inter, -apple-system, "Helvetica Neue", Arial, sans-serif; color: var(--ink); }
+  .mono { font-family: "JetBrains Mono", Menlo, monospace; }
+  .abs { position: absolute; }
+  .center { text-align: center; }
+
+  /* DataPyCap logo */
+  .logo { left: 860px; top: 23px; height: 33px; display: flex; border-radius: 17px; overflow: hidden;
+          font-weight: 700; font-size: 16px; line-height: 33px; }
+  .logo .d { background: var(--blue); color: #fff; padding: 0 12px 0 15px; }
+  .logo .p { background: var(--yellow); color: var(--blue); padding: 0 15px 0 12px; }
+
+  .title { left: 0; width: 1024px; top: 22px; font-size: 66px; font-weight: 800; color: var(--blue);
+           letter-spacing: -1.5px; line-height: 84px; }
+  .title .u { position: relative; }
+  .title .u::after { content: ""; position: absolute; left: 4px; right: 4px; bottom: -6px; height: 7px;
+                     background: var(--yellow); border-radius: 4px; }
+
+  .box { top: 137px; width: 245px; height: 135px; border: 3px solid var(--blue); border-radius: 16px;
+         background: var(--box); display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .box .big { font-size: 35px; font-weight: 700; color: var(--blue); line-height: 44px; }
+  .box .small { font-size: 28px; font-weight: 700; color: var(--ink); line-height: 40px; }
+  .box.mid { background: var(--yellow); justify-content: flex-start; padding-top: 14px; }
+  .pill { margin-top: 12px; width: 205px; height: 50px; border: 2px solid var(--blue); border-radius: 25px;
+          background: #fff; color: var(--blue); font-size: 19px; font-weight: 600; line-height: 46px; text-align: center; }
+
+  .arrow { top: 192px; width: 62px; height: 24px; }
+
+  .cap1 { font-size: 17px; font-weight: 600; color: var(--gray); line-height: 26px; }
+  .cap2 { font-size: 16px; font-weight: 500; color: var(--gray); line-height: 24px; }
+  .ok { font-size: 21px; font-weight: 700; color: var(--green); line-height: 28px; }
+
+  .dash { left: 510px; top: 276px; height: 86px; border-left: 4px dashed var(--blue); }
+
+  .vault { left: 366px; top: 364px; width: 292px; height: 95px; background: var(--blue); border-radius: 12px; }
+  .vault .inner { position: absolute; inset: 6px; border: 2px solid var(--yellow); border-radius: 8px;
+                  display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .vault .big { color: #fff; font-size: 30px; font-weight: 700; line-height: 36px; }
+  .vault .small { color: var(--yellow); font-size: 17px; font-weight: 700; line-height: 24px; }
+
+  .term { left: 679px; top: 388px; width: 320px; height: 45px; background: var(--term); border-radius: 12px;
+          color: #fff; font-size: 17px; font-weight: 600; line-height: 45px; text-align: center; }
+  .term .s { color: var(--yellow); }
+
+  .tag { left: 0; width: 1024px; top: 514px; font-size: 34px; font-weight: 700; color: var(--ink); line-height: 44px; }
+</style>
+</head>
+<body>
+  <div class="abs logo"><span class="d">Data</span><span class="p">PyCap</span></div>
+
+  <div class="abs title center">agent-<span class="u">hygiene</span></div>
+
+  <div class="abs box" style="left:63px"><div class="big">Agent</div><div class="small">leftovers</div></div>
+  <svg class="abs arrow" style="left:316px" viewBox="0 0 62 24"><path d="M0 12H46" stroke="#0C4EA2" stroke-width="6"/><path d="M42 1L62 12L42 23Z" fill="#0C4EA2"/></svg>
+  <div class="abs box mid" style="left:390px"><div class="big" style="font-size:31px">Scan + Clean</div><div class="pill mono">preview → confirm</div></div>
+  <svg class="abs arrow" style="left:643px" viewBox="0 0 62 24"><path d="M0 12H46" stroke="#0C4EA2" stroke-width="6"/><path d="M42 1L62 12L42 23Z" fill="#0C4EA2"/></svg>
+  <div class="abs box" style="left:716px"><div class="big">Tidy</div><div class="small">machine</div></div>
+
+  <div class="abs center" style="left:0;width:372px;top:292px">
+    <div class="cap1">what agents leave running</div>
+    <div class="cap2 mono">(auto-starts, old versions)</div>
+  </div>
+
+  <div class="abs center" style="left:680px;width:318px;top:288px">
+    <div class="ok">✓&nbsp;&nbsp;undo anytime</div>
+    <div class="cap1">restore = the identical state</div>
+  </div>
+
+  <div class="abs dash"></div>
+
+  <div class="abs vault"><div class="inner"><div class="big">Backup journal</div><div class="small">every change is reversible</div></div></div>
+  <div class="abs center cap1" style="left:366px;width:292px;top:470px;font-size:19px">nothing leaves your machine</div>
+
+  <div class="abs term mono"><span class="s">$</span> pip install agent-hygiene</div>
+
+  <div class="abs tag center">Keep the agent, lose the leftovers.</div>
+</body>
+</html>
