@@ -7,7 +7,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -21,7 +20,8 @@ from . import agents
 from .model import ProcessInfo
 from .output import shorten_home
 from .platform import IS_LINUX, atomic_write, expand, have, home, private_state_dir, run, runs_dir, state_dir
-from .scan.processes import descendants, list_processes, redact
+from .scan.footprint import find_npm_installs
+from .scan.processes import SUBREAPER, descendants, list_processes, redact, runs_from
 
 SKIP_DIR_NAMES = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache",
@@ -30,8 +30,6 @@ SKIP_DIR_NAMES = {
     "Music", "Pictures", "Photos Library.photoslibrary",
 }
 MAX_SNAPSHOT_ENTRIES = 400_000
-# orphans are re-parented to pid 1, or to a per-user subreaper on systemd/launchd systems
-_SUBREAPER = re.compile(r"(^|/)(systemd --user|launchd)(\s|$)")
 
 
 @dataclass
@@ -170,6 +168,18 @@ def _cgroup_pids(unit: str) -> Set[int]:
         return set()
 
 
+def _agent_folders(agent: Optional[str]) -> List[str]:
+    spec = agents.by_name(agent) if agent else None
+    if spec is None:
+        return []
+    folders = spec.own_folders()
+    for n in find_npm_installs(spec):
+        for form in (n.path, os.path.realpath(n.path)):
+            if form not in folders:
+                folders.append(form)
+    return folders
+
+
 class Supervisor:
     def __init__(self, argv: List[str], agent: Optional[str], watch: Sequence[Path],
                  grace: float, use_cgroup: bool, log=print):
@@ -184,6 +194,8 @@ class Supervisor:
         self.unit: Optional[str] = None
         self.tracked: Dict[int, str] = {}
         self.initial_pids: Set[int] = set()
+        self.started = time.time()
+        self.own_folders = _agent_folders(agent)
         self.report = RunReport(agent=agent, command=redact(" ".join(argv)),
                                 started_at=dt.datetime.now().isoformat(timespec="seconds"))
 
@@ -249,6 +261,7 @@ class Supervisor:
         depths = [12 if w != home() else 3 for w in self.watch]
         before, trunc1 = snapshot(self.watch, excluded, depths)
         self.initial_pids = {p.pid for p in list_processes()}
+        self.started = time.time()
 
         self._open_tty()
         self._install_signals()
@@ -330,14 +343,7 @@ class Supervisor:
             in_cgroup = p.pid in cg
             # with the subreaper set, the agent's orphans are re-parented to us
             adopted = p.ppid == me and p.pid not in self.initial_pids
-            parent = by_pid.get(p.ppid)
-            reparented = p.ppid <= 1 or (parent is not None and _SUBREAPER.search(parent.command) is not None)
-            escaped = (
-                p.pid not in self.initial_pids
-                and reparented
-                and agents.match_process(p.command) is not None
-                and (self.agent is None or agents.match_process(p.command) == self.agent)
-            )
+            escaped = self._escaped(p, by_pid)
             if in_group or tracked or in_cgroup or adopted or escaped:
                 out.append(p)
         # anything an escaped process itself spawned goes with it
@@ -348,6 +354,18 @@ class Supervisor:
                     chosen.add(d.pid)
                     out.append(d)
         return out
+
+    def _escaped(self, p: ProcessInfo, by_pid: Dict[int, ProcessInfo]) -> bool:
+        """A daemon the agent double-forked out of our process group. A matching name is
+        never enough: the program must live in the agent's own folders and must have
+        started during this run."""
+        if not self.own_folders or p.pid in self.initial_pids:
+            return False
+        if p.etime_s > time.time() - self.started + 2:
+            return False
+        parent = by_pid.get(p.ppid)
+        reparented = p.ppid <= 1 or (parent is not None and SUBREAPER.search(parent.command) is not None)
+        return reparented and runs_from(p, self.own_folders)
 
     def shutdown(self) -> None:
         if self.proc is None:

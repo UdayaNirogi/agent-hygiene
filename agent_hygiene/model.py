@@ -30,10 +30,15 @@ class VersionEntry:
     mtime: float
     is_dir: bool
     is_current: bool
+    in_use_by: List[int] = field(default_factory=list)  # pids running from this version
+
+    @property
+    def in_use(self) -> bool:
+        return bool(self.in_use_by)
 
 
 @dataclass
-class SelfUpdateSetting:
+class SettingState:
     agent: str
     supported: bool
     path: Optional[str] = None
@@ -41,6 +46,8 @@ class SelfUpdateSetting:
     current_value: Any = None
     disabled: Optional[bool] = None
     note: str = ""
+    kind: str = "self-update"  # self-update | auto-start
+    applicable: bool = True  # False when the setting's `requires` path is absent
 
 
 @dataclass
@@ -53,7 +60,8 @@ class AgentFootprint:
     binaries: List[str] = field(default_factory=list)
     versions_roots: List[str] = field(default_factory=list)
     versions: List[VersionEntry] = field(default_factory=list)  # sorted newest-first within each root
-    self_update: Optional[SelfUpdateSetting] = None
+    settings: List[SettingState] = field(default_factory=list)
+    settings_note: str = ""
     total_bytes: int = 0
 
     def versions_by_root(self) -> Dict[str, List[VersionEntry]]:
@@ -64,8 +72,13 @@ class AgentFootprint:
 
     @property
     def stale_versions(self) -> List[VersionEntry]:
-        """Per root: everything except the newest and the current one."""
-        return [v for vs in self.versions_by_root().values() for v in vs[1:] if not v.is_current]
+        """Per root: everything except the newest, the current one, and any still running."""
+        return [v for vs in self.versions_by_root().values() for v in vs[1:] if not v.is_current and not v.in_use]
+
+    def settings_on(self, kind: Optional[str] = None) -> List[SettingState]:
+        """Applicable settings that are still switched on."""
+        return [s for s in self.settings
+                if s.supported and s.applicable and not s.disabled and (kind is None or s.kind == kind)]
 
 
 @dataclass
@@ -94,6 +107,8 @@ class ProcessInfo:
     parent_command: str = ""
     uid: int = -1
     state: str = ""
+    exe: str = ""  # resolved program path, when the OS reveals it
+    role: str = ""  # daemon | updater, for an agent's background server
 
 
 @dataclass
@@ -121,6 +136,8 @@ class Inventory:
         d = asdict(self)
         for a, fp in zip(d["agents"], self.agents):
             a["stale_versions"] = [v.path for v in fp.stale_versions]
+            for v in a["versions"]:
+                v["in_use"] = bool(v["in_use_by"])
         return d
 
     def agent(self, name: str) -> Optional[AgentFootprint]:

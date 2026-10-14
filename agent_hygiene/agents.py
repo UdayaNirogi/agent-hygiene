@@ -6,19 +6,37 @@ contain glob characters.
 """
 from __future__ import annotations
 
+import glob
+import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from .platform import expand
+
 
 @dataclass(frozen=True)
-class SelfUpdateSpec:
-    """A JSON settings file plus the nested key that turns self-update off."""
+class SettingSpec:
+    """A settings file plus the nested key that switches a self-updater or auto-start off."""
 
     path: str
     key: Tuple[str, ...]
     disabled_value: object
+    kind: str = "self-update"  # self-update | auto-start
+    fmt: str = "json"  # json | toml
+    # only touch this setting when this path exists (e.g. the feature has been used)
+    requires: str = ""
     note: str = ""
+
+
+@dataclass(frozen=True)
+class DaemonSpec:
+    """A background server the agent leaves running, plus its separate updater process."""
+
+    server_pattern: str
+    updater_pattern: str
+    stop_args: Tuple[str, ...]
+    start_args: Tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -34,8 +52,9 @@ class AgentSpec:
     current_links: Tuple[str, ...] = ()
     process_patterns: Tuple[str, ...] = ()
     autostart_patterns: Tuple[str, ...] = ()
-    self_update: Optional[SelfUpdateSpec] = None
+    settings: Tuple[SettingSpec, ...] = ()
     self_update_note: str = ""
+    daemon: Optional[DaemonSpec] = None
 
     def process_regex(self) -> List["re.Pattern[str]"]:
         return [re.compile(p) for p in self.process_patterns]
@@ -49,6 +68,25 @@ class AgentSpec:
     def matches_autostart(self, text: str) -> bool:
         return any(r.search(text) for r in self.autostart_regex())
 
+    def setting(self, path: str, key: Tuple[str, ...]) -> Optional[SettingSpec]:
+        for s in self.settings:
+            if tuple(s.key) == tuple(key) and os.path.realpath(expand(s.path)) == os.path.realpath(path):
+                return s
+        return None
+
+    def own_folders(self) -> List[str]:
+        """The agent's own directories (literal and symlink-resolved forms)."""
+        out: List[str] = []
+        for pat in self.home_dirs + self.data_dirs + self.versions_roots:
+            expanded = str(expand(pat))
+            paths = glob.glob(expanded) if any(ch in expanded for ch in "*?[") else [expanded]
+            for p in paths:
+                if os.path.isdir(p):
+                    for form in (os.path.abspath(p), os.path.realpath(p)):
+                        if form not in out:
+                            out.append(form)
+        return out
+
 
 _CURSOR_IDE_MAC = "~/Library/Application Support/Cursor/User/globalStorage/anysphere.cursor-agent-worker"
 _CURSOR_IDE_LINUX = "~/.config/Cursor/User/globalStorage/anysphere.cursor-agent-worker"
@@ -60,10 +98,30 @@ AGENTS: List[AgentSpec] = [
         home_dirs=("~/.codex",),
         npm_packages=("@openai/codex",),
         binaries=("codex",),
+        # the standalone installer and the app-server daemon keep every release behind a `current` link
+        versions_roots=("~/.codex/packages/standalone/releases", "~/.codex/packages/app-server-daemon/releases"),
+        current_links=("~/.codex/packages/standalone/current", "~/.codex/packages/app-server-daemon/current",
+                       "~/.local/bin/codex"),
         process_patterns=(r"(^|/)codex(\s|$)", r"@openai/codex", r"codex-(x86_64|aarch64)-"),
         autostart_patterns=(r"openai", r"\bcodex\b"),
-        self_update_note="Codex CLI has no background self-updater; it only prints an "
-        "update notice. Update with `npm i -g @openai/codex`.",
+        settings=(
+            SettingSpec(
+                path="~/.codex/config.toml", key=("features", "daemon_auto_start"), disabled_value=False,
+                kind="auto-start", fmt="toml",
+                note="Sets [features] daemon_auto_start = false in ~/.codex/config.toml.",
+            ),
+            SettingSpec(
+                path="~/.codex/app-server-daemon/settings.json", key=("updater", "autoUpdateEnabled"),
+                disabled_value=False, requires="~/.codex/app-server-daemon",
+                note="Sets updater.autoUpdateEnabled=false in ~/.codex/app-server-daemon/settings.json.",
+            ),
+        ),
+        daemon=DaemonSpec(
+            server_pattern=r"(^|/)codex\S*\s+app-server(\s|$)",
+            updater_pattern=r"\bapp-server\s+daemon\s+pid-update-loop\b",
+            stop_args=("app-server", "daemon", "stop"),
+            start_args=("app-server", "daemon", "start"),
+        ),
     ),
     AgentSpec(
         name="claude",
@@ -80,12 +138,12 @@ AGENTS: List[AgentSpec] = [
             r"@anthropic-ai/claude-code",
         ),
         autostart_patterns=(r"anthropic", r"\bclaude\b"),
-        self_update=SelfUpdateSpec(
+        settings=(SettingSpec(
             path="~/.claude/settings.json",
             key=("env", "DISABLE_AUTOUPDATER"),
             disabled_value="1",
             note="Sets env.DISABLE_AUTOUPDATER=\"1\" in ~/.claude/settings.json.",
-        ),
+        ),),
     ),
     AgentSpec(
         name="cursor",
@@ -123,12 +181,12 @@ AGENTS: List[AgentSpec] = [
         binaries=("gemini",),
         process_patterns=(r"(^|/)gemini(\s|$)", r"@google/gemini-cli"),
         autostart_patterns=(r"gemini[-_.]cli", r"\bgemini\b"),
-        self_update=SelfUpdateSpec(
+        settings=(SettingSpec(
             path="~/.gemini/settings.json",
             key=("general", "disableAutoUpdate"),
             disabled_value=True,
             note="Sets general.disableAutoUpdate=true in ~/.gemini/settings.json.",
-        ),
+        ),),
     ),
     AgentSpec(
         name="copilot",
@@ -149,12 +207,12 @@ AGENTS: List[AgentSpec] = [
         binaries=("opencode",),
         process_patterns=(r"(^|/)opencode(\s|$)",),
         autostart_patterns=(r"\bopencode\b",),
-        self_update=SelfUpdateSpec(
+        settings=(SettingSpec(
             path="~/.config/opencode/opencode.json",
             key=("autoupdate",),
             disabled_value=False,
             note="Sets autoupdate=false in ~/.config/opencode/opencode.json.",
-        ),
+        ),),
     ),
     AgentSpec(
         name="devin",
@@ -204,6 +262,18 @@ def match_process(command: str) -> Optional[str]:
         if spec.matches_process(command):
             return spec.name
     return None
+
+
+def daemon_role(agent: Optional[str], command: str) -> str:
+    """'updater' or 'daemon' when the command is that agent's background server, else ''."""
+    spec = by_name(agent) if agent else None
+    if spec is None or spec.daemon is None:
+        return ""
+    if re.search(spec.daemon.updater_pattern, command):
+        return "updater"
+    if re.search(spec.daemon.server_pattern, command):
+        return "daemon"
+    return ""
 
 
 def match_autostart(text: str) -> Optional[str]:

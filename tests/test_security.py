@@ -68,6 +68,17 @@ class TestTamperResistance(FakeHomeTestCase):
         self.assertEqual(victim.read_text(), "keep me")
         self.assertFalse((self.home / "stolen.txt").exists())
 
+    def test_restore_never_runs_a_daemon_binary_outside_the_agent_folder(self):
+        (self.home / ".codex").mkdir()
+        marker = self.home / "pwned"
+        evil = self.write("evil.sh", f"#!/bin/sh\ntouch {marker}\n")
+        evil.chmod(0o755)
+        journal = Journal.create()
+        journal.record({"kind": "stop-daemon", "agent": "codex", "target": "daemon 1", "reversible": True,
+                        "binary": str(evil), "server_running": True, "stopped": []})
+        self.assertEqual(restore.restore(Journal.load(journal.root), log=_quiet), 1)
+        self.assertFalse(marker.exists())
+
     def test_purge_refuses_symlinked_trash(self):
         journal = self._seeded_journal()
         precious = self.home / "precious"

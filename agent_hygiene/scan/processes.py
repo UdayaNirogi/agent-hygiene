@@ -3,13 +3,18 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 from .. import agents
 from ..model import PortInfo, ProcessInfo
-from ..platform import have, run
+from ..platform import IS_LINUX, IS_MACOS, have, run
 
 PS_ARGS = ["ps", "-eo", "pid=,ppid=,pgid=,uid=,stat=,tty=,etime=,rss=,args="]
+
+# When a session ends its processes are re-parented to pid 1, or on desktops to a per-user
+# subreaper (`systemd --user` on Linux, launchd on macOS) that keeps them running.
+SUBREAPER = re.compile(r"(^|/)(systemd\s+--user|launchd|init)(\s|$)")
+_INTERPRETER = re.compile(r"(^|/)(node|nodejs|bun|deno|python[0-9.]*|ruby|perl|sh|bash|zsh|dash)$", re.IGNORECASE)
 
 # Command lines can carry credentials (e.g. `--api-key crsr_...`). Never print or log them.
 _SECRET_FLAG = re.compile(
@@ -78,6 +83,107 @@ def _no_tty(tty: str) -> bool:
     return tty in ("?", "??", "-", "")
 
 
+_LIBPROC = None
+
+
+def exe_path(pid: int) -> Optional[str]:
+    """The program file a process is running, from the kernel rather than its argv (which
+    a process can set to anything). None if the OS will not say."""
+    if IS_LINUX:
+        try:
+            path = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            return None
+        return path[: -len(" (deleted)")] if path.endswith(" (deleted)") else path
+    if IS_MACOS:
+        global _LIBPROC
+        try:
+            import ctypes
+            if _LIBPROC is None:
+                _LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib")
+            buf = ctypes.create_string_buffer(4096)
+            if _LIBPROC.proc_pidpath(pid, buf, 4096) > 0:
+                return buf.value.decode("utf-8", "replace")
+        except (OSError, AttributeError):
+            return None
+    return None
+
+
+def is_running(pid: int) -> bool:
+    """Alive and not a zombie (exited, only waiting to be reaped)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[-1].split()[0] != "Z"
+    except OSError:
+        pass
+    return not run(["ps", "-o", "stat=", "-p", str(pid)], timeout=5).stdout.strip().startswith("Z")
+
+
+def is_interpreter(path: str) -> bool:
+    return bool(path) and _INTERPRETER.search(path) is not None
+
+
+def _under(path: str, folder: str) -> bool:
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def runs_from(p: ProcessInfo, folders: Sequence[str]) -> bool:
+    """True if the process's program (or the script its interpreter runs) lives inside one
+    of `folders`. A matching name alone is never enough."""
+    if not folders:
+        return False
+    forms = set()
+    for f in folders:
+        forms.add(os.path.abspath(f))
+        forms.add(os.path.realpath(f))
+    exe = p.exe or exe_path(p.pid) or ""
+    if exe:
+        real = os.path.realpath(exe)
+        if any(_under(exe, f) or _under(real, f) for f in forms):
+            return True
+        if not is_interpreter(exe):
+            return False  # the kernel names a program elsewhere; argv cannot override that
+    cmd = p.command
+    prefixes = [f.rstrip(os.sep) + os.sep for f in forms]
+    if any(cmd.startswith(x) for x in prefixes):
+        return True
+    tokens = list(re.finditer(r"\S+", cmd))
+    if tokens and (is_interpreter(tokens[0].group(0)) or is_interpreter(exe)):
+        # the script the interpreter runs: its first argument that is not an option
+        script = next((t for t in tokens[1:] if not t.group(0).startswith("-")), None)
+        if script is not None:
+            rest = cmd[script.start():]
+            return any(rest.startswith(x) for x in prefixes)
+    return False
+
+
+def resolve_exes(procs: Iterable[ProcessInfo]) -> None:
+    for p in procs:
+        if not p.exe:
+            p.exe = exe_path(p.pid) or ""
+
+
+def running_from(procs: Iterable[ProcessInfo], folder: str, resolve: bool = True) -> List[ProcessInfo]:
+    """Processes whose program, or any argument, points inside `folder`."""
+    forms = {os.path.abspath(folder).rstrip(os.sep), os.path.realpath(folder).rstrip(os.sep)}
+    out = []
+    for p in procs:
+        exe = p.exe or (exe_path(p.pid) if resolve else None) or ""
+        if exe and any(_under(exe, f) or _under(os.path.realpath(exe), f) for f in forms):
+            out.append(p)
+            continue
+        padded = f" {p.command} "
+        if any(f" {f}{os.sep}" in padded or f" {f} " in padded for f in forms):
+            out.append(p)
+    return out
+
+
 def annotate(all_procs: List[ProcessInfo], self_pid: Optional[int] = None) -> List[ProcessInfo]:
     """Attribute processes to agents and flag ones whose session has ended."""
     self_pid = os.getpid() if self_pid is None else self_pid
@@ -97,10 +203,14 @@ def annotate(all_procs: List[ProcessInfo], self_pid: Optional[int] = None) -> Li
         if not agent:
             continue
         p.agent = agent
+        p.role = agents.daemon_role(agent, p.command)
+        p.exe = exe_path(p.pid) or ""
         parent = by_pid.get(p.ppid)
         p.parent_command = parent.command if parent else "(exited)"
-        # A session that ended leaves its children re-parented to pid 1 and detached from a tty.
-        p.orphaned = (p.ppid <= 1 or parent is None) and _no_tty(p.tty)
+        # A session that ended leaves its children detached from a tty and re-parented to
+        # pid 1 or to the desktop's per-user subreaper.
+        reparented = p.ppid <= 1 or parent is None or SUBREAPER.search(parent.command) is not None
+        p.orphaned = reparented and _no_tty(p.tty)
         matched.append(p)
 
     # Children of an orphaned agent process are leftovers too.
@@ -116,8 +226,8 @@ def annotate(all_procs: List[ProcessInfo], self_pid: Optional[int] = None) -> Li
     return matched
 
 
-def scan_processes(warnings: List[str]) -> List[ProcessInfo]:
-    return annotate(list_processes(warnings))
+def scan_processes(warnings: List[str], all_procs: Optional[List[ProcessInfo]] = None) -> List[ProcessInfo]:
+    return annotate(list_processes(warnings) if all_procs is None else all_procs)
 
 
 def descendants(all_procs: Iterable[ProcessInfo], root_pid: int) -> List[ProcessInfo]:

@@ -7,8 +7,10 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest import mock
 
-from agent_hygiene.runner import diff_snapshots, run_agent, snapshot
+from agent_hygiene.model import ProcessInfo
+from agent_hygiene.runner import Supervisor, diff_snapshots, run_agent, snapshot
 from agent_hygiene.scan.processes import list_processes
 from tests.helpers import FakeHomeTestCase
 
@@ -60,10 +62,10 @@ class TestRunner(FakeHomeTestCase):
 
     def test_daemon_that_escapes_the_process_group_is_swept(self):
         # Simulate a double-forked self-updater: a new session, re-parented to pid 1,
-        # whose command line looks like the agent (a script named `claude`), which in
-        # turn has a child of its own (`sleep 299`) that must go with it.
-        fake_bin = self.home / "fakebin"
-        fake_bin.mkdir()
+        # running a program from the agent's own folders, which in turn has a child of
+        # its own (`sleep 299`) that must go with it.
+        fake_bin = self.home / ".local/share/claude/versions/9.9.9"
+        fake_bin.mkdir(parents=True)
         script = fake_bin / "claude"
         # `exit $?` stops sh from exec'ing the last command, so sh stays the parent
         script.write_text("#!/bin/sh\nsleep 299\nexit $?\n")
@@ -95,6 +97,33 @@ class TestRunner(FakeHomeTestCase):
         finally:
             bystander.kill()
             bystander.wait()
+
+    def test_escape_sweep_requires_the_agents_own_folders(self):
+        (self.home / ".codex/packages/x/bin").mkdir(parents=True)
+        inside_exe = str(self.home / ".codex/packages/x/bin/codex")
+        launchd = ProcessInfo(1, 0, 1, "??", 0, 0, "/sbin/launchd")
+        shell = ProcessInfo(50, 1, 50, "ttys000", 0, 0, "-zsh")
+        by_pid = {1: launchd, 50: shell}
+
+        def proc(pid, exe, ppid=1, etime=2, cmd="codex app-server daemon pid-update-loop"):
+            return ProcessInfo(pid, ppid, pid, "??", etime, 0, cmd, exe=exe)
+
+        with mock.patch("agent_hygiene.runner.find_npm_installs", return_value=[]):
+            sup = Supervisor(["true"], "codex", [self.work], 1.0, False, _quiet)
+            anon = Supervisor(["sleep", "5"], None, [self.work], 1.0, False, _quiet)
+        for s in (sup, anon):
+            s.initial_pids = {300}
+            s.started = time.time() - 10
+        self.assertTrue(sup._escaped(proc(100, inside_exe), by_pid))
+        # an unrelated program that is merely *named* codex is never touched
+        self.assertFalse(sup._escaped(proc(101, "/usr/local/bin/codex"), by_pid))
+        self.assertFalse(sup._escaped(proc(102, "/Users/me/tools/codex", cmd="codex serve"), by_pid))
+        self.assertFalse(sup._escaped(proc(300, inside_exe), by_pid))  # existed before the run
+        self.assertFalse(sup._escaped(proc(103, inside_exe, etime=600), by_pid))  # older than the run
+        self.assertFalse(sup._escaped(proc(104, inside_exe, ppid=50), by_pid))  # still has a live parent
+        # `run -- sleep 5` has no agent folders, so nothing is ever swept by name
+        self.assertFalse(anon._escaped(proc(100, inside_exe), by_pid))
+        self.assertFalse(anon._escaped(proc(101, "/usr/local/bin/codex"), by_pid))
 
     def test_missing_command(self):
         self.assertEqual(run_agent(["definitely-not-a-real-binary-xyz"], watch=[str(self.work)], log=_quiet), 127)

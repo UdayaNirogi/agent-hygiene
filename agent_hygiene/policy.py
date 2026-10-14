@@ -152,10 +152,17 @@ class Policy:
                 v.append(Violation("max_disk", a.name,
                                    f"uses {human_bytes(a.total_bytes)}, limit {human_bytes(limit)}",
                                    f"agent-hygiene clean --agent {a.name}"))
-            su = a.self_update
-            if (not self.data.get("allow_self_update", True)) and su and su.supported and a.installed and not su.disabled:
-                v.append(Violation("allow_self_update", a.name, f"self-update is on ({su.key} in {su.path})",
-                                   f"agent-hygiene clean --agent {a.name} --self-update"))
+            if not a.installed:
+                continue
+            if not self.data.get("allow_self_update", True):
+                for s in a.settings_on("self-update"):
+                    v.append(Violation("allow_self_update", a.name, f"self-update is on ({s.key} in {s.path})",
+                                       f"agent-hygiene clean --agent {a.name} --self-update"))
+            for s in a.settings_on("auto-start"):
+                ident = f"{a.name}:{s.key}"
+                if not self.autostart_allowed(ident):
+                    v.append(Violation("allowed_autostarts", a.name, f"setting {ident} is on ({s.path})",
+                                       f"agent-hygiene clean --agent {a.name} --autostart"))
         limit_total = self.data.get("max_disk_total")
         if limit_total and total > parse_bytes(limit_total):
             v.append(Violation("max_disk_total", "*", f"all agents use {human_bytes(total)}, limit {limit_total}",

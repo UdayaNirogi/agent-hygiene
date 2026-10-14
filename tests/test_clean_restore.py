@@ -1,7 +1,11 @@
 import json
 import os
 import plistlib
+import subprocess
+import sys
+import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agent_hygiene import clean, restore
@@ -46,7 +50,7 @@ class TestCleanRestoreRoundTrip(FakeHomeTestCase):
         inv = self._scan()
         plan = clean.build_plan(inv, keep=2)
         kinds = sorted(a.kind for a in plan.actions)
-        self.assertEqual(kinds, ["disable-self-update", "disable-self-update", "prune-version",
+        self.assertEqual(kinds, ["disable-setting", "disable-setting", "prune-version",
                                  "prune-version", "prune-version"])
         pruned = sorted(a.data["version"] for a in plan.actions if a.kind == "prune-version")
         self.assertEqual(pruned, ["1.5.0", "2.0.0", "2026.08.01-ghi"])
@@ -82,7 +86,7 @@ class TestCleanRestoreRoundTrip(FakeHomeTestCase):
         before = fingerprint(self.home, ignore_prefixes=STATE)
         inv = self._scan()
         plan = clean.build_plan(inv, prune=False, autostart=False)
-        self.assertEqual([a.kind for a in plan.actions], ["disable-self-update"])
+        self.assertEqual([a.kind for a in plan.actions], ["disable-setting"])
         journal = clean.apply_plan(plan, log=_quiet)
         self.assertTrue((self.home / ".claude/settings.json").is_file())
         restore.restore(journal, log=_quiet)
@@ -147,6 +151,121 @@ class TestCleanRestoreRoundTrip(FakeHomeTestCase):
             self.assertIn("*/5 * * * * /usr/bin/backup", store["text"])
             self.assertEqual(restore.restore(journal, log=_quiet), 0)
         self.assertEqual(store["text"], original)
+
+    def test_old_journal_kind_still_restores(self):
+        self.write(".local/share/claude/versions/2.1.201", size=10)
+        before = fingerprint(self.home, ignore_prefixes=STATE)
+        journal = clean.apply_plan(clean.build_plan(self._scan(), prune=False, autostart=False), log=_quiet)
+        journal.actions[0]["kind"] = "disable-self-update"  # as written by 0.1.x
+        journal.save()
+        self.assertEqual(restore.restore(Journal.load(journal.root), log=_quiet), 0)
+        self.assertEqual(before, fingerprint(self.home, ignore_prefixes=STATE))
+
+    def _python_script(self, rel, body="import time\ntime.sleep(60)\n"):
+        p = self.write(rel, f"#!{sys.executable}\n{body}")
+        p.chmod(0o755)
+        return p
+
+    def _start(self, path, *args):
+        proc = subprocess.Popen([str(path), *args])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        time.sleep(0.4)
+        return proc
+
+    def test_prune_rechecks_right_before_moving(self):
+        for v in ("3.0", "2.0", "1.0"):
+            self._python_script(f".local/share/claude/versions/{v}/claude")
+        plan = clean.build_plan(self._scan(), keep=2, self_update=False, autostart=False)
+        self.assertEqual([a.data["version"] for a in plan.actions], ["1.0"])
+        # a session starts from 1.0 between the preview and the confirm
+        self._start(self.home / ".local/share/claude/versions/1.0/claude")
+        journal = clean.apply_plan(plan, log=_quiet)
+        self.assertEqual(journal.actions, [])
+        self.assertTrue((self.home / ".local/share/claude/versions/1.0/claude").exists())
+
+    def test_scan_skips_running_version(self):
+        for v in ("3.0", "2.0", "1.0"):
+            self._python_script(f".local/share/claude/versions/{v}/claude")
+        proc = self._start(self.home / ".local/share/claude/versions/1.0/claude")
+        with mock.patch("agent_hygiene.scan.scan_autostarts", return_value=[]), \
+             mock.patch("agent_hygiene.scan.footprint.npm_global_roots", return_value=[]):
+            inv = scan(only=["claude"], with_ports=False)
+        plan = clean.build_plan(inv, keep=2, self_update=False, autostart=False)
+        self.assertEqual(plan.actions, [])
+        self.assertTrue(any(f"pid {proc.pid}" in s for s in plan.skipped))
+
+    def test_purge_keeps_a_trashed_version_that_is_running(self):
+        for v in ("3.0", "2.0", "1.0"):
+            self._python_script(f".local/share/claude/versions/{v}/claude")
+        journal = clean.apply_plan(clean.build_plan(self._scan(), keep=2, self_update=False), log=_quiet)
+        trashed = Path(journal.actions[0]["trash"])
+        self._start(trashed / "claude")
+        restore.purge(journal, log=_quiet)
+        self.assertTrue((trashed / "claude").exists())
+        self.assertIsNone(Journal.load(journal.root).purged_at)
+
+    def test_codex_settings_and_releases_round_trip(self):
+        self.write(".codex/config.toml", '# mine\nmodel = "o3"\n\n[features]\nweb_search = true\n')
+        self.write(".codex/app-server-daemon/settings.json", '{"remoteControlEnabled": false}\n')
+        rel = self.home / ".codex/packages/standalone/releases"
+        for v in ("0.162.1-x86_64-unknown-linux-musl", "0.161.0-x86_64-unknown-linux-musl",
+                  "0.157.0-x86_64-unknown-linux-musl"):
+            self.write(f".codex/packages/standalone/releases/{v}/codex", size=128)
+        os.symlink(rel / "0.162.1-x86_64-unknown-linux-musl", self.home / ".codex/packages/standalone/current")
+        before = fingerprint(self.home, ignore_prefixes=STATE)
+
+        plan = clean.build_plan(self._scan(), keep=2)
+        kinds = sorted((a.kind, a.agent) for a in plan.actions)
+        self.assertEqual(kinds, [("disable-setting", "codex"), ("disable-setting", "codex"),
+                                 ("prune-version", "codex")])
+        journal = clean.apply_plan(plan, log=_quiet)
+        toml = (self.home / ".codex/config.toml").read_text()
+        self.assertIn("[features]\ndaemon_auto_start = false\nweb_search = true\n", toml)
+        self.assertTrue(toml.startswith('# mine\nmodel = "o3"\n'))
+        daemon = json.loads((self.home / ".codex/app-server-daemon/settings.json").read_text())
+        self.assertEqual(daemon, {"remoteControlEnabled": False, "updater": {"autoUpdateEnabled": False}})
+        self.assertFalse((rel / "0.157.0-x86_64-unknown-linux-musl").exists())
+        self.assertEqual(clean.build_plan(self._scan(), keep=2).actions, [])
+
+        self.assertEqual(restore.restore(journal, log=_quiet), 0)
+        self.assertEqual(before, fingerprint(self.home, ignore_prefixes=STATE))
+
+    def test_codex_daemon_stopped_only_from_inside_codex_folder(self):
+        log = self.home / "daemon.log"
+        body = (
+            "import sys, time\n"
+            "args = ' '.join(sys.argv[1:])\n"
+            "if args in ('app-server daemon stop', 'app-server daemon start'):\n"
+            f"    open({str(log)!r}, 'a').write(args.split()[-1] + '\\n')\n"
+            "    sys.exit(0)\n"
+            "time.sleep(60)\n"
+        )
+        codex = self._python_script(".codex/packages/standalone/releases/0.162.1-x/bin/codex", body)
+        os.symlink(self.home / ".codex/packages/standalone/releases/0.162.1-x",
+                   self.home / ".codex/packages/standalone/current")
+        other = self._python_script("elsewhere/codex", body)
+        server = self._start(codex, "app-server", "--listen", "unix:///tmp/x")
+        updater = self._start(codex, "app-server", "daemon", "pid-update-loop")
+        bystander = self._start(other, "app-server", "daemon", "pid-update-loop")
+
+        with mock.patch("agent_hygiene.scan.scan_autostarts", return_value=[]), \
+             mock.patch("agent_hygiene.scan.footprint.npm_global_roots", return_value=[]):
+            inv = scan(only=["codex"], with_ports=False)
+        plan = clean.build_plan(inv, self_update=False, prune=False)
+        stops = [a for a in plan.actions if a.kind == "stop-daemon"]
+        self.assertEqual(len(stops), 1)
+        self.assertEqual(sorted(p["pid"] for p in stops[0].data["procs"]), sorted([server.pid, updater.pid]))
+        self.assertTrue(any(f"pid {bystander.pid}" in s for s in plan.skipped))
+
+        journal = clean.apply_plan(clean.Plan(actions=stops), log=_quiet)
+        self.assertEqual(log.read_text(), "stop\n")
+        server.wait(timeout=10)
+        updater.wait(timeout=10)
+        self.assertIsNone(bystander.poll())
+
+        self.assertEqual(restore.restore(journal, log=_quiet), 0)
+        self.assertEqual(log.read_text(), "stop\nstart\n")
 
     def test_kill_is_irreversible_and_opt_in(self):
         from agent_hygiene.model import Inventory, ProcessInfo

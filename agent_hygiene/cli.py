@@ -39,7 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     c = sub.add_parser("clean", help="preview fixes, confirm, apply with a backup journal")
     add_common(c)
-    c.add_argument("--autostart", action="store_true", help="disable agent auto-start entries")
+    c.add_argument("--autostart", action="store_true",
+                   help="disable auto-start entries and settings, stop agent background servers")
     c.add_argument("--self-update", action="store_true", help="turn off agent self-update settings")
     c.add_argument("--prune", action="store_true", help="move old version folders to trash")
     c.add_argument("--kill", action="store_true", help="terminate leftover processes (NOT reversible)")

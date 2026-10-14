@@ -1,3 +1,3 @@
 """agent-hygiene: inventory and clean up the footprint of coding-agent CLIs."""
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"

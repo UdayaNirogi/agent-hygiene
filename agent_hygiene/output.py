@@ -6,7 +6,7 @@ import os
 import sys
 from typing import Any, List, Sequence
 
-from .model import Inventory
+from .model import AgentFootprint, Inventory
 from .platform import home, human_bytes, human_duration
 
 
@@ -44,6 +44,13 @@ def dump_json(obj: Any, out=None) -> None:
     print(json.dumps(obj, indent=2, sort_keys=False, default=str), file=out or sys.stdout)
 
 
+def _switch(a: AgentFootprint, kind: str) -> str:
+    relevant = [s for s in a.settings if s.kind == kind and s.applicable]
+    if not relevant:
+        return "n/a"
+    return "on" if a.settings_on(kind) else "off"
+
+
 def render_inventory(inv: Inventory, verbose: bool = False) -> str:
     out: List[str] = [f"agent-hygiene scan  host={inv.host}  os={inv.os}  at={inv.generated_at}"]
 
@@ -51,21 +58,14 @@ def render_inventory(inv: Inventory, verbose: bool = False) -> str:
     for a in inv.agents:
         if not a.installed and not verbose:
             continue
-        su = a.self_update
-        if su is None or not su.supported:
-            su_text = "n/a"
-        elif su.disabled:
-            su_text = "off"
-        else:
-            su_text = "on"
         rows.append([
             a.name, "yes" if a.installed else "no", human_bytes(a.total_bytes),
-            len(a.versions), len(a.stale_versions), su_text,
+            len(a.versions), len(a.stale_versions), _switch(a, "self-update"), _switch(a, "auto-start"),
             ", ".join(f"{n.package}@{n.version} ({n.manager})" for n in a.npm) or
             ", ".join(shorten_home(b) for b in a.binaries) or "-",
         ])
     out.append(section("Agents"))
-    out.append(table(["agent", "present", "disk", "versions", "stale", "self-update", "install"], rows)
+    out.append(table(["agent", "present", "disk", "versions", "stale", "self-update", "auto-start", "install"], rows)
                if rows else "no known agents found")
 
     rows = []
@@ -83,6 +83,8 @@ def render_inventory(inv: Inventory, verbose: bool = False) -> str:
         for vs in a.versions_by_root().values():
             for i, v in enumerate(vs):
                 status = "current" if v.is_current else ("newest" if i == 0 else "stale")
+                if v.in_use:
+                    status += ", in use"
                 rows.append([a.name, v.version, status, "dir" if v.is_dir else "file",
                              human_bytes(v.bytes), shorten_home(v.path)])
     if rows:
@@ -100,7 +102,7 @@ def render_inventory(inv: Inventory, verbose: bool = False) -> str:
     out.append(section("Processes"))
     if inv.processes:
         rows = [[p.agent or "-", p.pid, p.ppid, p.tty, human_duration(p.etime_s),
-                 human_bytes(p.rss_kb * 1024), "LEFTOVER" if p.orphaned else "",
+                 human_bytes(p.rss_kb * 1024), " ".join(x for x in ("LEFTOVER" if p.orphaned else "", p.role) if x),
                  p.command, p.parent_command] for p in inv.processes]
         out.append(table(["agent", "pid", "ppid", "tty", "uptime", "rss", "", "command", "parent"], rows))
     else:

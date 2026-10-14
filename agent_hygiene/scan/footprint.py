@@ -9,9 +9,11 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..agents import AgentSpec
-from ..model import AgentFootprint, DiskEntry, NpmInstall, SelfUpdateSetting, VersionEntry
+from .. import tomlkeys
+from ..agents import AgentSpec, SettingSpec
+from ..model import AgentFootprint, DiskEntry, NpmInstall, ProcessInfo, SettingState, VersionEntry
 from ..platform import expand, have, home, run
+from .processes import resolve_exes, running_from
 
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+)+(?:[-+.][0-9A-Za-z.]+)?)")
 
@@ -161,20 +163,31 @@ def find_versions(spec: AgentSpec) -> Tuple[List[str], List[VersionEntry]]:
     return [str(r) for r in roots], all_entries
 
 
-def select_prunable(versions: List[VersionEntry], keep: int) -> List[VersionEntry]:
-    """Per root: everything beyond the newest `keep`, never the current one.
+def mark_in_use(versions: List[VersionEntry], procs: List[ProcessInfo]) -> None:
+    """Record which live processes run from (or point into) each version folder."""
+    resolve_exes(procs)
+    for v in versions:
+        v.in_use_by = sorted(p.pid for p in running_from(procs, v.path, resolve=False))
+
+
+def beyond_keep(versions: List[VersionEntry], keep: int) -> List[VersionEntry]:
+    """Per root: everything beyond the newest `keep` except the current one.
     Input must be sorted newest-first within each root."""
     keep = max(keep, 1)
     by_root: Dict[str, List[VersionEntry]] = {}
     for v in versions:
         by_root.setdefault(v.root, []).append(v)
-    out: List[VersionEntry] = []
-    for vs in by_root.values():
-        out.extend(v for v in vs[keep:] if not v.is_current)
-    return out
+    return [v for vs in by_root.values() for v in vs[keep:] if not v.is_current]
 
 
-# --- self-update setting ------------------------------------------------------
+def select_prunable(versions: List[VersionEntry], keep: int, ignore_pids: Optional[set] = None) -> List[VersionEntry]:
+    """`beyond_keep`, minus any version a live process runs from (`ignore_pids` are
+    processes about to be stopped)."""
+    ignore = ignore_pids or set()
+    return [v for v in beyond_keep(versions, keep) if not set(v.in_use_by) - ignore]
+
+
+# --- self-update and auto-start settings --------------------------------------
 
 def read_nested(data: Dict[str, Any], key: Tuple[str, ...]):
     cur: Any = data
@@ -185,20 +198,26 @@ def read_nested(data: Dict[str, Any], key: Tuple[str, ...]):
     return cur
 
 
-def self_update_state(spec: AgentSpec) -> SelfUpdateSetting:
-    if spec.self_update is None:
-        return SelfUpdateSetting(agent=spec.name, supported=False, note=spec.self_update_note)
-    su = spec.self_update
-    path = expand(su.path)
+def read_setting(path: Path, s: SettingSpec):
+    text = path.read_text()
+    if s.fmt == "toml":
+        table = ".".join(s.key[:-1]) or None
+        return tomlkeys.get(text, table, s.key[-1])
+    return read_nested(json.loads(text or "{}"), s.key)
+
+
+def setting_state(spec: AgentSpec, s: SettingSpec) -> SettingState:
+    path = expand(s.path)
     value = None
     if path.is_file():
         try:
-            value = read_nested(json.loads(path.read_text() or "{}"), su.key)
+            value = read_setting(path, s)
         except (OSError, ValueError):
             value = None
-    return SelfUpdateSetting(
-        agent=spec.name, supported=True, path=str(path), key=".".join(su.key),
-        current_value=value, disabled=(value == su.disabled_value), note=su.note,
+    return SettingState(
+        agent=spec.name, supported=True, path=str(path), key=".".join(s.key),
+        current_value=value, disabled=(value == s.disabled_value), note=s.note, kind=s.kind,
+        applicable=not s.requires or os.path.lexists(expand(s.requires)),
     )
 
 
@@ -216,7 +235,8 @@ def scan_agent(spec: AgentSpec, npm_roots: Optional[List[Tuple[Path, str]]] = No
         if found:
             fp.binaries.append(found)
     fp.versions_roots, fp.versions = find_versions(spec)
-    fp.self_update = self_update_state(spec)
+    fp.settings = [setting_state(spec, s) for s in spec.settings]
+    fp.settings_note = spec.self_update_note
 
     # Version roots usually sit inside a data dir that is already counted; only add
     # them separately when they are not.

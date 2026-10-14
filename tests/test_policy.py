@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from agent_hygiene.model import AgentFootprint, AutostartEntry, Inventory, ProcessInfo, SelfUpdateSetting, VersionEntry
+from agent_hygiene.model import AgentFootprint, AutostartEntry, Inventory, ProcessInfo, SettingState, VersionEntry
 from agent_hygiene.platform import human_bytes, parse_bytes
 from agent_hygiene.policy import Policy, render_violations, write_template
 from tests.helpers import FakeHomeTestCase
@@ -12,9 +12,12 @@ def _inv():
     claude = AgentFootprint("claude", "Claude", True, total_bytes=6 * 1024**3)
     claude.versions = [VersionEntry(f"/v/{v}", "/v", v, 1024**3, 0, False, i == 0) for i, v in
                        enumerate(("2.3", "2.2", "2.1", "2.0"))]
-    claude.self_update = SelfUpdateSetting("claude", True, "/s.json", "env.X", None, False)
+    claude.settings = [SettingState("claude", True, "/s.json", "env.X", None, False)]
     codex = AgentFootprint("codex", "Codex", True, total_bytes=100 * 1024**2)
-    codex.self_update = SelfUpdateSetting("codex", False)
+    codex.settings = [SettingState("codex", True, "/c.toml", "features.daemon_auto_start", None, False,
+                                   kind="auto-start"),
+                      SettingState("codex", True, "/d.json", "updater.autoUpdateEnabled", None, False,
+                                   applicable=False)]
     inv.agents = [claude, codex]
     inv.autostarts = [AutostartEntry("systemd-user", "claude-updater.timer", "/u", "claude", True, "claude update"),
                       AutostartEntry("cron", "abc123", "crontab", "codex", True, "codex", "0 * * * *")]
@@ -39,10 +42,14 @@ class TestPolicy(unittest.TestCase):
             "allow_leftover_processes": False,
         })
         rules = sorted(v.rule for v in pol.evaluate(_inv()))
+        # the codex daemon updater setting is not applicable (daemon never ran), so it is not flagged
         self.assertEqual(rules, ["allow_leftover_processes", "allow_self_update", "allowed_autostarts",
-                                 "keep_versions", "max_disk", "max_disk_total"])
+                                 "allowed_autostarts", "keep_versions", "max_disk", "max_disk_total"])
         text = render_violations(pol.evaluate(_inv()), "p.json")
-        self.assertIn("6 violation(s)", text)
+        self.assertIn("7 violation(s)", text)
+        self.assertIn("codex:features.daemon_auto_start", text)
+        allowed = Policy({"allowed_autostarts": ["*", "codex:features.daemon_auto_start"]})
+        self.assertNotIn("allowed_autostarts", [v.rule for v in allowed.evaluate(_inv())])
         self.assertIn("agent-hygiene clean --agent claude --keep 2", text)
 
     def test_permissive_policy_passes(self):

@@ -17,11 +17,12 @@ $ agent-hygiene scan
 
 Agents
 ======
-agent   present  disk    versions  stale  self-update  install
-------  -------  ------  --------  -----  -----------  -------
-claude  yes      221 MB  1         0      on           ~/.local/bin/claude
-cursor  yes      6.8 GB  16        15     n/a          -
-gemini  yes      18 MB   0         0      on           -
+agent   present  disk    versions  stale  self-update  auto-start  install
+------  -------  ------  --------  -----  -----------  ----------  -------
+claude  yes      221 MB  1         0      on           n/a         ~/.local/bin/claude
+codex   yes      410 MB  3         1      on           on          ~/.local/bin/codex
+cursor  yes      6.8 GB  16        15     n/a          n/a         -
+gemini  yes      18 MB   0         0      on           n/a         -
 
 Processes
 =========
@@ -51,10 +52,14 @@ Finds every agent's footprint:
 
 - folders such as `~/.codex`, `~/.claude`, `~/.cursor`, `~/.gemini`, data dirs under
   `~/.local/share`, and global installs from npm, pnpm, bun, volta, nvm, fnm, pipx and uv;
-- auto-start entries: macOS LaunchAgents, systemd user units and timers, user crontab lines;
+- auto-start entries: macOS LaunchAgents, systemd user units and timers, user crontab lines,
+  and auto-start settings such as Codex's `daemon_auto_start`;
 - running processes with their parent process, flagged `LEFTOVER` when the session that
-  started them has ended, plus their open sockets (`lsof` / `ss`);
-- disk use for each agent and each installed version, with old versions marked `stale`.
+  started them has ended (re-parented to pid 1, or to `systemd --user` / launchd on a
+  desktop), agent background servers flagged `daemon` / `updater`, plus their open sockets
+  (`lsof` / `ss`);
+- disk use for each agent and each installed version, with old versions marked `stale` and
+  versions a live process still runs from marked `in use`.
 
 ```sh
 agent-hygiene scan                 # table
@@ -71,10 +76,23 @@ Command lines are printed with API keys and tokens redacted.
 
 | flag | what it does | undo |
 | --- | --- | --- |
-| `--autostart` | unloads LaunchAgents / disables systemd user units / comments out cron lines | plist and crontab are backed up; `restore` puts them back and re-enables |
+| `--autostart` | unloads LaunchAgents / disables systemd user units / comments out cron lines, turns off auto-start settings, and stops agent background servers | plist, crontab and settings files are backed up; `restore` puts them back, re-enables, and starts a stopped server again |
 | `--self-update` | turns off the agent's self-updater setting (e.g. `DISABLE_AUTOUPDATER` for Claude Code, `general.disableAutoUpdate` for Gemini) | the settings file is backed up byte-for-byte |
-| `--prune [--keep N]` | moves old version folders to a trash dir, keeping the newest N (default 2) and never the version in use | `restore` renames them back |
+| `--prune [--keep N]` | moves old version folders to a trash dir, keeping the newest N (default 2), never the current version and never one a live process runs from | `restore` renames them back |
 | `--kill` | terminates leftover processes whose session already ended | **not reversible**, so it is never on by default |
+
+#### Codex background daemon
+
+Since Codex CLI 0.157 an interactive session starts a background app-server that outlives the
+terminal, plus a separate hourly updater. `clean` handles all of it:
+
+- writes `daemon_auto_start = false` under `[features]` in `~/.codex/config.toml` (the rest of
+  the file, comments included, is left as it was);
+- writes `updater.autoUpdateEnabled = false` in `~/.codex/app-server-daemon/settings.json`;
+- prunes old releases under `~/.codex/packages/*/releases`, keeping the `current` one;
+- stops the daemon with `codex app-server daemon stop` (so in-flight work can drain), then
+  ends the updater, but only processes whose program lives inside `~/.codex`. A program
+  that is merely *named* codex is never touched.
 
 ```sh
 agent-hygiene clean                     # preview everything reversible, then confirm
@@ -90,6 +108,9 @@ and keeps them on disk so `restore` is exact. Disk space is reclaimed when you d
 agent-hygiene purge                     # delete trashed versions from all pending backups
 agent-hygiene purge --older-than 7      # only trash older than a week
 ```
+
+Both `clean` and `purge` check again, right before moving or deleting a version, that no
+process is running from it; a busy version is left in place and reported.
 
 ### `restore` — undo
 
@@ -108,7 +129,9 @@ Launches the agent in its own process group (and, on Linux with systemd, a trans
 `systemd-run --user --scope` cgroup). When the agent exits:
 
 1. everything it started is sent SIGTERM, then SIGKILL after a grace period — including
-   children that detached into their own session, as long as they still look like the agent;
+   children that detached into their own session, as long as they started during the run
+   and their program lives inside that agent's own folders (a name match is never enough,
+   so `run -- sleep 5` cannot touch an unrelated program called `codex`);
 2. files it created or modified outside its own folders are listed;
 3. a JSON report is written to `~/.agent-hygiene/runs/`.
 
@@ -137,7 +160,7 @@ agent-hygiene clean --policy team.json  # prune with the policy's keep_versions
   "keep_versions": 2,
   "max_disk_per_agent": "5GB",
   "max_disk_total": "20GB",
-  "allowed_autostarts": ["com.example.allowed.*"],
+  "allowed_autostarts": ["com.example.allowed.*", "codex:features.daemon_auto_start"],
   "allow_self_update": false,
   "allow_leftover_processes": false,
   "agents": { "codex": { "keep_versions": 1, "max_disk": "2GB" } }
@@ -160,7 +183,11 @@ agent-hygiene clean --policy team.json  # prune with the policy's keep_versions
   through fresh temp files rather than predictable names.
 - **Careful with processes.** `--kill` re-checks that a pid still runs the same command before
   signalling it, and `run` matches tracked children by pid *and* command, so a reused pid is
-  never killed.
+  never killed. Anything matched outside the agent's own process tree must also be running a
+  program from the agent's own folders, judged by the path the kernel reports rather than the
+  process's self-reported name.
+- **Restore runs only the agent's own program.** Restarting a stopped daemon refuses any
+  binary that is not inside the agent's folders, even if the backup manifest was edited.
 - **No surprises from cloned repos.** `clean` ignores policy files in the current directory;
   pass `--policy FILE` or use `~/.config/agent-hygiene/policy.json`.
 - **Not as root.** `clean`, `restore`, `purge` and `run` refuse to run under `sudo`.
@@ -180,8 +207,8 @@ repository's Security tab.
 
 Every agent is one `AgentSpec` entry in `agent_hygiene/agents.py`: home and data dirs,
 package names, version-folder roots, the symlink that marks the current version, regexes for
-process and auto-start matching, and (if the agent has one) the settings key that disables
-self-update.
+process and auto-start matching, the settings keys (JSON or TOML) that switch off
+self-update or auto-start, and, for agents that leave a server running, how to stop it.
 
 ## Development
 
