@@ -1,0 +1,55 @@
+name: Release
+
+# Pushing a tag like v0.2.1 runs the full CI matrix first; the package is built and
+# published to PyPI only when every test job and the security job have passed.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Tag must match the package version
+        run: |
+          pkg=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          test "v$pkg" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != version $pkg"; exit 1; }
+      - name: Build sdist and wheel
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*
+          tar -tzf dist/*.tar.gz | grep -q 'tests/helpers.py'  # the tests ship in the sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    # Set the repository variable PYPI_TRUSTED_PUBLISHING=true once the trusted publisher
+    # (owner UdayaNirogi, repo agent-hygiene, workflow release.yml, environment pypi) is
+    # configured on PyPI. Until then this job is skipped and the release is uploaded by hand
+    # after this workflow is green.
+    if: vars.PYPI_TRUSTED_PUBLISHING == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

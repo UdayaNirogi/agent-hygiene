@@ -239,9 +239,28 @@ AGENTS: List[AgentSpec] = [
 
 # Anything matching these is never attributed to an agent, even if an agent pattern hits.
 EXCLUDE_PROCESS_PATTERNS = [
-    re.compile(r"agent[-_]hygiene"),
     re.compile(r"(^|/)(rg|grep|egrep|ps|lsof|less|more|tail|cat|vim|nano|code)\s"),
 ]
+_SELF_NAMES = ("agent-hygiene", "agent_hygiene")
+_PYTHON = re.compile(r"^python[0-9.]*$")
+
+
+def is_self(command: str) -> bool:
+    """Our own process: the `agent-hygiene` program or `python -m agent_hygiene`. Judged by
+    the program name only, so a checkout or venv in a folder called agent-hygiene does not
+    hide every agent process launched from inside it."""
+    tokens = command.split()
+    if not tokens:
+        return False
+    if os.path.basename(tokens[0]) in _SELF_NAMES:
+        return True
+    if _PYTHON.match(os.path.basename(tokens[0])):
+        for i, tok in enumerate(tokens[1:], 1):
+            if tok == "-m":
+                return i + 1 < len(tokens) and tokens[i + 1].split(".")[0] == "agent_hygiene"
+            if not tok.startswith("-"):
+                return os.path.basename(tok) in _SELF_NAMES
+    return False
 
 
 def by_name(name: str) -> Optional[AgentSpec]:
@@ -256,7 +275,7 @@ def names() -> List[str]:
 
 
 def match_process(command: str) -> Optional[str]:
-    if any(p.search(command) for p in EXCLUDE_PROCESS_PATTERNS):
+    if is_self(command) or any(p.search(command) for p in EXCLUDE_PROCESS_PATTERNS):
         return None
     for spec in AGENTS:
         if spec.matches_process(command):

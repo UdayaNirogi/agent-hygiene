@@ -27,6 +27,23 @@ class TestAgentMatching(unittest.TestCase):
         self.assertIsNone(agents.match_process("/Applications/Claude.app/Contents/MacOS/Claude"))
         self.assertIsNone(agents.match_process("vim claude-notes.md"))
 
+    def test_self_exclusion_is_by_program_name_only(self):
+        # our own processes, however they were started
+        for cmd in ("agent-hygiene scan", "/x/.venv/bin/agent-hygiene clean --kill",
+                    "python3 -m agent_hygiene run -- claude", "/usr/bin/python3.12 -u -m agent_hygiene.cli scan",
+                    "/x/.venv/bin/python3 /x/.venv/bin/agent-hygiene clean"):
+            with self.subTest(cmd):
+                self.assertTrue(agents.is_self(cmd))
+                self.assertIsNone(agents.match_process(cmd))
+        # a checkout or venv in a folder named agent-hygiene must not hide real agents
+        for cmd, want in (("/home/me/agent-hygiene/.local/bin/claude serve", "claude"),
+                          ("/opt/venvs/agent-hygiene/bin/python3 /h/.codex/bin/codex app-server", "codex"),
+                          ("node /Users/me/agent-hygiene/node_modules/@openai/codex/bin/codex.js", "codex"),
+                          ("gemini -p 'tidy agent-hygiene'", "gemini")):
+            with self.subTest(cmd):
+                self.assertFalse(agents.is_self(cmd))
+                self.assertEqual(agents.match_process(cmd), want)
+
     def test_guess_from_argv0(self):
         self.assertEqual(agents.guess_from_argv0("claude"), "claude")
         self.assertEqual(agents.guess_from_argv0("/opt/homebrew/bin/codex"), "codex")
@@ -270,6 +287,24 @@ class TestFootprint(FakeHomeTestCase):
         self.assertEqual(fp.settings_on(), [])
         self.assertGreater(fp.total_bytes, 4096)
         self.assertEqual(len(fp.versions), 1)
+
+    def test_npm_roots_found_without_running_npm(self):
+        # a Homebrew-style layout: bin/npm -> ../lib/node_modules/npm/bin/npm-cli.js
+        prefix = self.home / "prefix"
+        (prefix / "lib/node_modules/npm/bin").mkdir(parents=True)
+        (prefix / "lib/node_modules/npm/bin/npm-cli.js").write_text("#!/usr/bin/env node\n")
+        (prefix / "lib/node_modules/npm/bin/npm-cli.js").chmod(0o755)
+        (prefix / "bin").mkdir()
+        os.symlink("../lib/node_modules/npm/bin/npm-cli.js", prefix / "bin/npm")
+        (self.home / "custom/lib/node_modules").mkdir(parents=True)
+        self.write(".npmrc", f"registry=https://example.invalid\nprefix={self.home}/custom\n")
+        env = {"PATH": str(prefix / "bin"), "HOME": str(self.home)}
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(subprocess, "run", side_effect=AssertionError("a subprocess was started")):
+            os.environ.pop("NPM_CONFIG_PREFIX", None)
+            roots = [str(p) for p, _ in footprint.npm_global_roots()]
+        self.assertIn(str(prefix / "lib/node_modules"), roots)
+        self.assertIn(str(self.home / "custom/lib/node_modules"), roots)
 
     def test_npm_global_detection(self):
         pkg = self.home / "node_modules/@openai/codex"

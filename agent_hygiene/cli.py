@@ -21,7 +21,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="agent-hygiene",
         description="Inventory and clean up what coding-agent CLIs leave behind. "
-                    "Read-only unless you run clean/purge/run, and every clean is reversible with restore.",
+                    "Read-only unless you run clean/purge/run. Everything clean does by default can be "
+                    "undone with restore; the exceptions, clean --kill and purge, are opt-in and ask first.",
     )
     p.add_argument("--version", action="version", version=f"agent-hygiene {__version__}")
     sub = p.add_subparsers(dest="cmd", metavar="command")

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:  # the release workflow runs this first and publishes only if it passes
 
 permissions:
   contents: read

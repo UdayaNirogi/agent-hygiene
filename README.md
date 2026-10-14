@@ -1,6 +1,6 @@
 # agent-hygiene
 
-![agent-hygiene: scan and clean what coding agents leave behind, with every change reversible](https://raw.githubusercontent.com/UdayaNirogi/agent-hygiene/main/assets/banner.png)
+![agent-hygiene: scan and clean what coding agents leave behind, with a backup journal to undo it](https://raw.githubusercontent.com/UdayaNirogi/agent-hygiene/main/assets/banner.png)
 
 A small local CLI for macOS and Linux that shows what coding-agent CLIs (Codex, Claude Code,
 Cursor Agent, Gemini CLI, Copilot CLI, OpenCode, Devin, Aider) leave behind on your machine,
@@ -8,7 +8,9 @@ and cleans it up safely.
 
 Agent CLIs can leave auto-starting background processes, self-updaters, and old version
 folders that pile up, and some keep running after you quit. `agent-hygiene` is **read-only
-by default**, and **every change it makes is reversible**.
+by default**, and **everything `clean` does by default can be undone** with `restore`. The
+two exceptions are opt-in and say so before they run: `clean --kill` ends a process, and
+`purge` deletes trashed versions for good.
 
 Think of it as Task Manager + the Startup tab + "Programs and Features", scoped to agents.
 
@@ -174,7 +176,9 @@ agent-hygiene clean --policy team.json  # prune with the policy's keep_versions
 ## Privacy and security
 
 - **Nothing leaves your machine.** No network calls, telemetry, analytics or update checks;
-  a test fails the build if a networking module is ever imported.
+  a test fails the build if a networking module is ever imported. `scan` also never runs
+  `npm` (which would write a log file under `~/.npm/_logs` on every call); it works out the
+  global package folders from where the `npm` binary lives and from `.npmrc`.
 - **Only your own processes.** `scan` reads processes owned by the current user, never other
   accounts on the machine.
 - **Secrets are redacted** from every command line it prints or logs: API-key and token flags,
@@ -221,7 +225,20 @@ python3 -m unittest discover -s tests -t .
 ```
 
 Tests run against a fake `$HOME` and never touch your real agent installs. The `run` tests
-spawn real background processes to prove that nothing survives the wrapper.
+spawn real background processes to prove that nothing survives the wrapper. The tests ship
+in the source download from PyPI, so `pip download --no-binary :all: agent-hygiene` gives
+you something you can run them against.
+
+### Releasing
+
+A release is a git tag. Pushing `vX.Y.Z` runs the whole CI matrix again, checks that the tag
+matches the version in `pyproject.toml`, builds the sdist and wheel, and publishes to PyPI
+through trusted publishing. Nothing is uploaded if any test job fails.
+
+```sh
+# bump version in pyproject.toml and agent_hygiene/__init__.py, commit, wait for CI on main
+git tag -a vX.Y.Z -m "agent-hygiene X.Y.Z" && git push origin vX.Y.Z
+```
 
 ## License
 

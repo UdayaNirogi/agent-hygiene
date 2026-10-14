@@ -1,7 +1,8 @@
 """Build a plan of fixes from an inventory, preview it, and apply it with a backup journal.
 
 Each applied action writes a restore record into the journal; `restore.py` reverses them
-in reverse order. Killing a process is the only irreversible action and is opt-in.
+in reverse order. Killing a process is the only irreversible action here and is opt-in;
+`purge` (in restore.py) is the other one and is a separate command.
 """
 from __future__ import annotations
 

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .. import tomlkeys
 from ..agents import AgentSpec, SettingSpec
 from ..model import AgentFootprint, DiskEntry, NpmInstall, ProcessInfo, SettingState, VersionEntry
-from ..platform import expand, have, home, run
+from ..platform import expand, home
 from .processes import resolve_exes, running_from
 
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+)+(?:[-+.][0-9A-Za-z.]+)?)")
@@ -74,13 +74,12 @@ def npm_global_roots() -> List[Tuple[Path, str]]:
     roots += [(Path(p), "fnm") for p in sorted(glob.glob(str(h / ".local/share/fnm/node-versions/*/installation/lib/node_modules")))]
     roots += [(Path(p), "fnm") for p in sorted(glob.glob(str(h / "Library/Application Support/fnm/node-versions/*/installation/lib/node_modules")))]
     roots += [(Path(p), "asdf") for p in sorted(glob.glob(str(h / ".asdf/installs/nodejs/*/lib/node_modules")))]
-    prefix = os.environ.get("NPM_CONFIG_PREFIX")
+    # Never run `npm root -g` here: npm writes a debug log under ~/.npm/_logs on every
+    # call, so a read-only scan would leave files behind. Work it out from where npm is.
+    prefix = os.environ.get("NPM_CONFIG_PREFIX") or _npmrc_prefix()
     if prefix:
-        roots.append((Path(prefix) / "lib" / "node_modules", "npm"))
-    if have("npm"):
-        res = run(["npm", "root", "-g"], timeout=10)
-        if res.returncode == 0 and res.stdout.strip():
-            roots.append((Path(res.stdout.strip()), "npm"))
+        roots.append((Path(os.path.expanduser(prefix)) / "lib" / "node_modules", "npm"))
+    roots += [(r, "npm") for r in _roots_from_npm_binary()]
     seen, uniq = set(), []
     for p, mgr in roots:
         key = str(p)
@@ -88,6 +87,35 @@ def npm_global_roots() -> List[Tuple[Path, str]]:
             seen.add(key)
             uniq.append((p, mgr))
     return uniq
+
+
+def _npmrc_prefix() -> Optional[str]:
+    rc = os.environ.get("NPM_CONFIG_USERCONFIG") or str(home() / ".npmrc")
+    try:
+        with open(rc) as fh:
+            for line in fh:
+                key, sep, value = line.strip().partition("=")
+                if sep and key.strip() == "prefix" and value.strip():
+                    return value.strip().strip("\"'")
+    except OSError:
+        pass
+    return None
+
+
+def _roots_from_npm_binary() -> List[Path]:
+    """`<prefix>/bin/npm` means globals live in `<prefix>/lib/node_modules`; the resolved
+    `.../lib/node_modules/npm/bin/npm-cli.js` names the same folder directly."""
+    found = shutil.which("npm")
+    if not found:
+        return []
+    out: List[Path] = []
+    for p in (found, os.path.realpath(found)):
+        marker = f"{os.sep}lib{os.sep}node_modules{os.sep}"
+        if marker in p:
+            out.append(Path(p.split(marker, 1)[0]) / "lib" / "node_modules")
+        elif os.path.basename(os.path.dirname(p)) == "bin":
+            out.append(Path(os.path.dirname(os.path.dirname(p))) / "lib" / "node_modules")
+    return out
 
 
 def find_npm_installs(spec: AgentSpec, roots: Optional[List[Tuple[Path, str]]] = None) -> List[NpmInstall]:

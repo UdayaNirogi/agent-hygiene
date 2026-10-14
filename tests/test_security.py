@@ -199,6 +199,15 @@ class TestNoNetwork(unittest.TestCase):
         # socket is only used for gethostname(), which makes no network connection
         self.assertEqual([o for o in offenders if o != "__init__.py: socket"], [])
 
+    def test_footprint_scan_starts_no_subprocess(self):
+        # `npm root -g` would write ~/.npm/_logs/*.log on every scan; the file scan must
+        # stay purely a file scan (only ps/lsof/launchctl/systemctl/crontab are ever run).
+        from agent_hygiene.scan import footprint
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("subprocess started")):
+            footprint.npm_global_roots()
+            for spec in cli.agents.AGENTS:
+                footprint.scan_agent(spec, npm_roots=[])
+
     def test_scan_opens_no_sockets(self):
         import socket as _socket
         with mock.patch.object(_socket.socket, "connect", side_effect=AssertionError("network used")), \
