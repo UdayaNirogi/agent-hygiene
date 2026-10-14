@@ -14,7 +14,8 @@ for block in blocks:
     body = block.split("-" * 70, 1)[-1].strip()
     body = body.split("\n" + "-" * 70, 1)[0][-3500:]
     body = body.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    print(f"::error title={m.group(1)} {m.group(3)}.{m.group(2)}::{body}")
+    where = m.group(3) if m.group(3).endswith(m.group(2)) else f"{m.group(3)}.{m.group(2)}"
+    print(f"::error title={m.group(1)} {where}::{body}")
     count += 1
     if count >= 10:
         break

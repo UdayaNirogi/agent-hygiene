@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -448,6 +449,10 @@ def run_agent(argv: List[str], agent: Optional[str] = None, watch: Optional[Sequ
     if not argv:
         log("usage: agent-hygiene run [--agent NAME] -- <command> [args...]")
         return 2
+    # checked up front: behind systemd-run a missing command would surface as exit 1, not 127
+    if shutil.which(argv[0]) is None:
+        log(f"agent-hygiene: command not found: {argv[0]}")
+        return 127
     agent = agent or agents.guess_from_argv0(argv[0])
     roots = [Path(w).absolute() for w in watch] if watch else [Path.cwd(), home()]
     uniq: List[Path] = []
