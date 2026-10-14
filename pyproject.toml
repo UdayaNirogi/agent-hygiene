@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,7 +10,8 @@ readme = "README.md"
 authors = [
     {name = "Udaya Nirogi", email = "data.pycap@gmail.com"}
 ]
-license = { file = "LICENSE" }
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = []
 keywords = ["cli", "agents", "codex", "claude-code", "cursor", "gemini", "cleanup", "launchagents", "systemd"]
