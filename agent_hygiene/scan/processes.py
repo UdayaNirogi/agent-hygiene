@@ -9,7 +9,7 @@ from .. import agents
 from ..model import PortInfo, ProcessInfo
 from ..platform import have, run
 
-PS_ARGS = ["ps", "-eo", "pid=,ppid=,pgid=,uid=,tty=,etime=,rss=,args="]
+PS_ARGS = ["ps", "-eo", "pid=,ppid=,pgid=,uid=,stat=,tty=,etime=,rss=,args="]
 
 # Command lines can carry credentials (e.g. `--api-key crsr_...`). Never print or log them.
 _SECRET_FLAG = re.compile(
@@ -49,13 +49,13 @@ def parse_etime(text: str) -> int:
 def parse_ps(output: str) -> List[ProcessInfo]:
     procs: List[ProcessInfo] = []
     for line in output.splitlines():
-        parts = line.split(None, 7)
-        if len(parts) < 8:
+        parts = line.split(None, 8)
+        if len(parts) < 9:
             continue
         try:
             procs.append(ProcessInfo(
-                pid=int(parts[0]), ppid=int(parts[1]), pgid=int(parts[2]), uid=int(parts[3]), tty=parts[4],
-                etime_s=parse_etime(parts[5]), rss_kb=int(parts[6]), command=redact(parts[7].strip()),
+                pid=int(parts[0]), ppid=int(parts[1]), pgid=int(parts[2]), uid=int(parts[3]), state=parts[4],
+                tty=parts[5], etime_s=parse_etime(parts[6]), rss_kb=int(parts[7]), command=redact(parts[8].strip()),
             ))
         except ValueError:
             continue
@@ -63,14 +63,15 @@ def parse_ps(output: str) -> List[ProcessInfo]:
 
 
 def list_processes(warnings: Optional[List[str]] = None) -> List[ProcessInfo]:
-    """The current user's processes only; other accounts' processes are never read or reported."""
+    """The current user's running processes. Other accounts' processes are never read or
+    reported, and zombies (already exited, waiting to be reaped) are not running."""
     res = run(PS_ARGS, timeout=15)
     if res.returncode != 0:
         if warnings is not None:
             warnings.append(f"ps failed: {res.stderr.strip() or res.returncode}")
         return []
     me = os.getuid()
-    return [p for p in parse_ps(res.stdout) if p.uid == me]
+    return [p for p in parse_ps(res.stdout) if p.uid == me and not p.state.startswith("Z")]
 
 
 def _no_tty(tty: str) -> bool:

@@ -93,6 +93,7 @@ class ProcessInfo:
     orphaned: bool = False
     parent_command: str = ""
     uid: int = -1
+    state: str = ""
 
 
 @dataclass

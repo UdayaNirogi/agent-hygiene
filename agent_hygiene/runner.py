@@ -109,14 +109,45 @@ def diff_snapshots(before: Dict[str, Tuple[int, int]], after: Dict[str, Tuple[in
 
 # --- process control ------------------------------------------------------------------
 
-def _alive(pid: int) -> bool:
+def _alive(pid: int, reap: bool = True) -> bool:
+    """Still running? Reaps `pid` if it is our child (as a subreaper we adopt the agent's
+    orphans), and treats zombies as gone: they have exited and only await reaping."""
+    if reap:
+        try:
+            done, _ = os.waitpid(pid, os.WNOHANG)
+            if done == pid:
+                return False
+        except ChildProcessError:
+            pass
     try:
         os.kill(pid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[-1].split()[0] == "Z"
+    except OSError:
+        pass
+    return run(["ps", "-o", "stat=", "-p", str(pid)], timeout=5).stdout.strip().startswith("Z")
+
+
+def _become_subreaper() -> bool:
+    """Linux: orphaned descendants are re-parented to us instead of escaping to init or
+    another subreaper, so nothing the agent double-forks can get away."""
+    if not IS_LINUX:
+        return False
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+    except (OSError, AttributeError):
+        return False
 
 
 def _systemd_user_available() -> bool:
@@ -220,6 +251,8 @@ class Supervisor:
 
         self._open_tty()
         self._install_signals()
+        if _become_subreaper():
+            self.report.isolation += "+subreaper"
         cmd = self._command()
         try:
             self.proc = subprocess.Popen(
@@ -270,10 +303,12 @@ class Supervisor:
         if self.proc is None:
             return
         procs = list_processes()
+        me = os.getpid()
         cg = _cgroup_pids(f"{self.unit}.scope") if self.unit else set()
         desc = {p.pid for p in descendants(procs, self.proc.pid)}
         for p in procs:
-            if p.pid in desc or p.pgid == self.proc.pid or p.pid in cg:
+            adopted = p.ppid == me and p.pid != self.proc.pid and p.pid not in self.initial_pids
+            if p.pid in desc or p.pgid == self.proc.pid or p.pid in cg or adopted:
                 self.tracked[p.pid] = p.command
 
     # -- teardown ----------------------------------------------------------------------
@@ -292,6 +327,8 @@ class Supervisor:
             # same pid *and* same command line, so a reused pid is never mistaken for ours
             tracked = self.tracked.get(p.pid) == p.command
             in_cgroup = p.pid in cg
+            # with the subreaper set, the agent's orphans are re-parented to us
+            adopted = p.ppid == me and p.pid not in self.initial_pids
             parent = by_pid.get(p.ppid)
             reparented = p.ppid <= 1 or (parent is not None and _SUBREAPER.search(parent.command) is not None)
             escaped = (
@@ -300,7 +337,7 @@ class Supervisor:
                 and agents.match_process(p.command) is not None
                 and (self.agent is None or agents.match_process(p.command) == self.agent)
             )
-            if in_group or tracked or in_cgroup or escaped:
+            if in_group or tracked or in_cgroup or adopted or escaped:
                 out.append(p)
         # anything an escaped process itself spawned goes with it
         chosen = {p.pid for p in out}
@@ -319,21 +356,34 @@ class Supervisor:
             targets.append(ProcessInfo(self.proc.pid, os.getpid(), self.proc.pid, "", 0, 0, self.report.command))
         if not targets:
             return
+        root = self.proc.pid
+
+        def alive(pid: int) -> bool:
+            # never reap the agent itself here; Popen owns its exit status
+            return _alive(pid, reap=pid != root)
+
         self._signal_all(targets, signal.SIGTERM)
         deadline = time.time() + self.grace
-        while time.time() < deadline and any(_alive(t.pid) for t in targets):
+        while time.time() < deadline and any(alive(t.pid) for t in targets):
             time.sleep(0.1)
-        survivors = [t for t in targets if _alive(t.pid)]
+        survivors = [t for t in targets if alive(t.pid)]
         if survivors:
             self._signal_all(survivors, signal.SIGKILL)
-            time.sleep(0.2)
+            deadline = time.time() + 2
+            while time.time() < deadline and any(alive(t.pid) for t in survivors):
+                time.sleep(0.05)
+        if self.proc.poll() is None:
+            try:
+                self.proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
         if self.unit:
             run(["systemctl", "--user", "stop", f"{self.unit}.scope"], timeout=10)
         for t in targets:
             self.report.killed.append({"pid": t.pid, "command": t.command,
                                        "forced": any(s.pid == t.pid for s in survivors)})
         # whatever is still around after all that is a genuine leftover
-        self.report.leftovers = [{"pid": t.pid, "command": t.command} for t in self._targets() if _alive(t.pid)]
+        self.report.leftovers = [{"pid": t.pid, "command": t.command} for t in self._targets() if alive(t.pid)]
 
     def _signal_all(self, targets: List[ProcessInfo], sig: int) -> None:
         if self.unit and have("systemctl"):

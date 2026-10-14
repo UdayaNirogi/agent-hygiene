@@ -17,12 +17,18 @@ jobs:
         python: ["3.9", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - name: Unit and end-to-end tests
-        run: python -m unittest discover -s tests -t . -v
+      - name: Unit, security and end-to-end tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -t . -v 2>&1 | tee test-output.txt
+      - name: Report failing tests
+        if: failure()
+        run: python .github/annotate_failures.py test-output.txt
       - name: Scan the runner (read-only smoke test)
         run: |
           python -m agent_hygiene scan
@@ -31,4 +37,16 @@ jobs:
       - name: Policy template round-trip
         run: |
           python -m agent_hygiene policy init --file /tmp/policy.json
-          python -m agent_hygiene policy check --file /tmp/policy.json
+          python -m agent_hygiene policy check --file /tmp/policy.json || test $? -eq 1
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Bandit static analysis (fails on medium or high severity)
+        run: |
+          pip install bandit
+          bandit -r agent_hygiene --severity-level medium

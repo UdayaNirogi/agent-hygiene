@@ -41,9 +41,9 @@ class TestProcesses(unittest.TestCase):
 
     def test_parse_ps_and_redact(self):
         out = (
-            "  100     1   100   501 ??       01:00  3000 /x/.local/bin/claude --api-key sk-abcdefghijklmnop serve\n"
-            "  101   100   100   501 ??       00:30  1000 node child.js TOKEN=verysecretvalue\n"
-            "  200   999   200     0 ttys001  00:10   500 /bin/zsh\n"
+            "  100     1   100   501 S    ??       01:00  3000 /x/.local/bin/claude --api-key sk-abcdefghijklmnop serve\n"
+            "  101   100   100   501 S    ??       00:30  1000 node child.js TOKEN=verysecretvalue\n"
+            "  200   999   200     0 Ss+  ttys001  00:10   500 /bin/zsh\n"
         )
         procs = processes.parse_ps(out)
         self.assertEqual([p.pid for p in procs], [100, 101, 200])
@@ -55,8 +55,9 @@ class TestProcesses(unittest.TestCase):
 
     def test_list_processes_only_returns_current_user(self):
         me = os.getuid()
-        out = (f"  10  1 10 {me} ?? 00:01 1 /x/claude\n"
-               f"  11  1 11 {me + 1} ?? 00:01 1 /x/claude --other-user\n")
+        out = (f"  10  1 10 {me} S ?? 00:01 1 /x/claude\n"
+               f"  11  1 11 {me + 1} S ?? 00:01 1 /x/claude --other-user\n"
+               f"  12  1 12 {me} Z ?? 00:01 0 <defunct>\n")
         fake = subprocess.CompletedProcess([], 0, out, "")
         with mock.patch.object(processes, "run", return_value=fake):
             self.assertEqual([p.pid for p in processes.list_processes()], [10])
